@@ -1,121 +1,15 @@
-// JuleHygge - et hyggeligt juleoverlay til Windows
-// Snevejr, sne på proceslinjen, julemanden i kane, nisser og julelys.
-// Bygges med build.ps1 (bruger den indbyggede .NET Framework C#-compiler).
-
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace JuleHygge
 {
-    static class Program
-    {
-        [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
-
-        [STAThread]
-        static void Main()
-        {
-            bool createdNew;
-            using (var mutex = new System.Threading.Mutex(true, "JuleHygge_SingleInstance", out createdNew))
-            {
-                if (!createdNew) return;
-                try { SetProcessDPIAware(); } catch { }
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new Overlay());
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------ indstillinger
-    class Settings
-    {
-        public bool Snow = true, SnowGround = true, Santa = true, Nisser = true, Lights = true, PauseFullscreen = true;
-        public int SnowLevel = 1;   // 0 = let, 1 = normal, 2 = snestorm
-        public int NisseCount = 3;
-
-        static string FilePath
-        {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JuleHygge", "settings.ini"); }
-        }
-
-        public static Settings Load()
-        {
-            var s = new Settings();
-            try
-            {
-                if (!File.Exists(FilePath)) return s;
-                foreach (var line in File.ReadAllLines(FilePath))
-                {
-                    int i = line.IndexOf('=');
-                    if (i < 0) continue;
-                    string k = line.Substring(0, i).Trim(), v = line.Substring(i + 1).Trim();
-                    switch (k)
-                    {
-                        case "Snow": s.Snow = v == "1"; break;
-                        case "SnowGround": s.SnowGround = v == "1"; break;
-                        case "Santa": s.Santa = v == "1"; break;
-                        case "Nisser": s.Nisser = v == "1"; break;
-                        case "Lights": s.Lights = v == "1"; break;
-                        case "PauseFullscreen": s.PauseFullscreen = v == "1"; break;
-                        case "SnowLevel": int.TryParse(v, out s.SnowLevel); break;
-                        case "NisseCount": int.TryParse(v, out s.NisseCount); break;
-                    }
-                }
-            }
-            catch { }
-            s.SnowLevel = Math.Max(0, Math.Min(2, s.SnowLevel));
-            s.NisseCount = Math.Max(1, Math.Min(12, s.NisseCount));
-            return s;
-        }
-
-        public void Save()
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-                File.WriteAllLines(FilePath, new[] {
-                    "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
-                    "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
-                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount });
-            }
-            catch { }
-        }
-        static string B(bool b) { return b ? "1" : "0"; }
-    }
-
-    // ------------------------------------------------------------------ objekter
-    class Flake
-    {
-        public float X, Y, R, Vy, Phase, Sway, SwaySpd, Rot, RotSpd;
-        public int A;
-        public bool Crystal;
-    }
-
-    class Spark
-    {
-        public float X, Y, VX, VY, Life, Max, Size;
-        public bool Gold;
-    }
-
-    class Nisse
-    {
-        public float X, Dir, Speed, WalkPhase, T, StateTimer, Size;
-        public int State;          // 0 = går, 1 = står stille, 2 = vinker
-        public bool CarriesGift;
-        public Color Tunic, Mitten, Gift;
-    }
-
-    // ------------------------------------------------------------------ overlay-vinduet
-    class Overlay : Form
+    // Ét gennemsigtigt, klik-igennem overlay-vindue for én skærm.
+    class Layer : Form
     {
         #region Win32
         const int WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20, WS_EX_TOOLWINDOW = 0x80,
@@ -124,7 +18,6 @@ namespace JuleHygge
         [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; public POINT(int x, int y) { X = x; Y = y; } }
         [StructLayout(LayoutKind.Sequential)] struct SIZE { public int CX, CY; public SIZE(int a, int b) { CX = a; CY = b; } }
         [StructLayout(LayoutKind.Sequential, Pack = 1)] struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
-        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential)]
         struct BITMAPINFOHEADER
         {
@@ -143,61 +36,51 @@ namespace JuleHygge
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
         [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
-        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
-        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+        [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)] static extern IntPtr memset(IntPtr dest, int c, UIntPtr count);
         #endregion
 
-        Settings cfg = Settings.Load();
-        Random rnd = new Random();
+        readonly Controller c;
+        Settings cfg { get { return c.Cfg; } }
+        readonly Random rnd;
+        public readonly bool IsPrimary;
+        public Rectangle ScreenBounds;
+        public float S;
+        public PointF SnowmanPos { get; private set; }
+        int W, H;
+        float groundY, dpiScale = 1f;
 
-        Rectangle bounds; int W, H; float groundY, S, dpiScale = 1f;
-        IntPtr pixels;
-        IntPtr memDc, hDib, hOldBmp; Bitmap canvas; Graphics g;
+        IntPtr memDc, hDib, hOldBmp, pixels;
+        Bitmap canvas;
+        Graphics g;
 
-        Timer timer;
-        Stopwatch clock = Stopwatch.StartNew();
-        double lastT; float time;
+        readonly List<Flake> flakes = new List<Flake>();
+        float[] heap;
+        const int HeapStep = 4;
+        readonly List<Nisse> nisser = new List<Nisse>();
+        Bitmap lightsBmp;
+        float lightsTimer;
+        bool paused;
 
-        NotifyIcon tray;
-        ToolStripMenuItem countdownItem;
+        // områder der er tegnet på, så kun de skal ryddes næste frame
+        List<Rectangle> dirty = new List<Rectangle>(), prevDirty = new List<Rectangle>();
 
-        List<Flake> flakes = new List<Flake>();
-        float[] heap; const int HeapStep = 4;
-        float wind, windTarget, windTimer;
-
-        bool santaActive; float santaX, santaY0, santaDir = 1, santaSpeed, santaNext = 5f, santaPhase, sparkAcc;
-        List<Spark> sparks = new List<Spark>();
-        List<Nisse> nisser = new List<Nisse>();
-
-        bool paused, needClear; float fsCheckTimer, topmostTimer;
-
-        // farver
         static readonly Color SantaRed = Color.FromArgb(205, 25, 35), Gold = Color.FromArgb(235, 195, 70),
             Skin = Color.FromArgb(255, 214, 186), Deer = Color.FromArgb(145, 95, 55), DeerDark = Color.FromArgb(100, 62, 32),
             HatRed = Color.FromArgb(210, 30, 40);
-        SolidBrush[] flakeBrushes = new SolidBrush[16];
-        Pen[] flakePens = new Pen[16];
+        readonly Pen[] flakePens = new Pen[16];
 
-        public Overlay()
+        public Layer(Controller controller, Screen scr)
         {
+            c = controller;
+            rnd = new Random(c.Rnd.Next());
+            IsPrimary = scr.Primary;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
             Text = "JuleHygge";
-            for (int i = 0; i < 16; i++)
-            {
-                flakeBrushes[i] = new SolidBrush(Color.FromArgb(60 + i * 13, 255, 255, 255));
-                flakePens[i] = new Pen(Color.FromArgb(60 + i * 13, 255, 255, 255), 1.2f);
-            }
-            InitSurface();
-            BuildTray();
-            SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
-
-            timer = new Timer();
-            timer.Interval = 33;
-            timer.Tick += Tick;
+            for (int i = 0; i < 16; i++) flakePens[i] = new Pen(Color.FromArgb(60 + i * 13, 255, 255, 255), 1.2f);
+            InitSurface(scr);
         }
 
         protected override CreateParams CreateParams
@@ -213,38 +96,32 @@ namespace JuleHygge
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e) { }
 
-        protected override void OnShown(EventArgs e)
+        protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            base.OnShown(e);
-            lastT = clock.Elapsed.TotalSeconds;
-            timer.Start();
-            tray.ShowBalloonTip(4000, "Jule-hygge er tændt",
-                "Højreklik på snefnug-ikonet ved uret for indstillinger. Dobbeltklik for at kalde på julemanden!", ToolTipIcon.None);
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            timer.Stop();
-            SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
-            tray.Visible = false;
-            tray.Dispose();
-            cfg.Save();
             FreeSurface();
-            base.OnFormClosing(e);
+            if (lightsBmp != null) { lightsBmp.Dispose(); lightsBmp = null; }
+            foreach (var p in flakePens) p.Dispose();
+            base.OnFormClosed(e);
         }
 
-        void OnDisplayChanged(object sender, EventArgs e)
+        public void KeepOnTop()
         {
-            BeginInvoke(new Action(() => { InitSurface(); flakes.Clear(); }));
+            SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
+        }
+
+        float Rnd() { return (float)rnd.NextDouble(); }
+
+        void Mark(float x, float y, float w, float h)
+        {
+            dirty.Add(new Rectangle((int)Math.Floor(x) - 2, (int)Math.Floor(y) - 2, (int)Math.Ceiling(w) + 5, (int)Math.Ceiling(h) + 5));
         }
 
         // ------------------------------------------------------------------ tegneflade
-        void InitSurface()
+        void InitSurface(Screen scr)
         {
-            FreeSurface();
-            var scr = Screen.PrimaryScreen;
-            bounds = scr.Bounds; W = bounds.Width; H = bounds.Height;
-            groundY = scr.WorkingArea.Bottom - bounds.Top;
+            ScreenBounds = scr.Bounds;
+            W = ScreenBounds.Width; H = ScreenBounds.Height;
+            groundY = scr.WorkingArea.Bottom - ScreenBounds.Top;
             S = Math.Max(0.6f, H / 1080f);
             using (var sg = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, sg.DpiX / 96f);
 
@@ -253,19 +130,17 @@ namespace JuleHygge
             bih.biWidth = W; bih.biHeight = -H; bih.biPlanes = 1; bih.biBitCount = 32;
             IntPtr screenDc = GetDC(IntPtr.Zero);
             memDc = CreateCompatibleDC(screenDc);
-            IntPtr bits;
-            hDib = CreateDIBSection(screenDc, ref bih, 0, out bits, IntPtr.Zero, 0);
+            hDib = CreateDIBSection(screenDc, ref bih, 0, out pixels, IntPtr.Zero, 0);
             ReleaseDC(IntPtr.Zero, screenDc);
             hOldBmp = SelectObject(memDc, hDib);
 
-            pixels = bits;
-            canvas = new Bitmap(W, H, W * 4, PixelFormat.Format32bppPArgb, bits);
+            canvas = new Bitmap(W, H, W * 4, PixelFormat.Format32bppPArgb, pixels);
             g = Graphics.FromImage(canvas);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.CompositingQuality = CompositingQuality.HighSpeed;
 
             heap = new float[W / HeapStep + 2];
-            Bounds = bounds;
+            Bounds = ScreenBounds;
         }
 
         void FreeSurface()
@@ -285,7 +160,7 @@ namespace JuleHygge
         {
             g.Flush(FlushIntention.Sync);
             IntPtr screenDc = GetDC(IntPtr.Zero);
-            var dst = new POINT(bounds.X, bounds.Y);
+            var dst = new POINT(ScreenBounds.X, ScreenBounds.Y);
             var size = new SIZE(W, H);
             var src = new POINT(0, 0);
             var bf = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
@@ -293,114 +168,84 @@ namespace JuleHygge
             ReleaseDC(IntPtr.Zero, screenDc);
         }
 
-        // ------------------------------------------------------------------ hovedløkke
-        void Tick(object sender, EventArgs e)
+        void ClearAll()
         {
-            double now = clock.Elapsed.TotalSeconds;
-            float dt = (float)Math.Min(0.1, now - lastT);
-            lastT = now;
+            g.Flush(FlushIntention.Sync);
+            memset(pixels, 0, new UIntPtr((ulong)W * (ulong)H * 4));
+        }
 
-            topmostTimer -= dt;
-            if (topmostTimer <= 0)
+        unsafe void ClearRects(List<Rectangle> rects)
+        {
+            g.Flush(FlushIntention.Sync);
+            uint* buf = (uint*)pixels.ToPointer();
+            foreach (var r in rects)
             {
-                topmostTimer = 2f;
-                SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
-            }
-
-            fsCheckTimer -= dt;
-            if (fsCheckTimer <= 0)
-            {
-                fsCheckTimer = 1f;
-                bool p = cfg.PauseFullscreen && IsFullscreenAppActive();
-                if (p && !paused) needClear = true;
-                paused = p;
-            }
-            if (paused)
-            {
-                if (needClear) { g.Clear(Color.Transparent); Present(); needClear = false; }
-                return;
-            }
-
-            time += dt;
-            UpdateSnow(dt);
-            UpdateSanta(dt);
-            UpdateNisser(dt);
-
-            long t0 = clock.ElapsedTicks;
-            ClearCanvas();
-            long t1 = clock.ElapsedTicks;
-            if (cfg.Lights) DrawLights();
-            if (santaActive || sparks.Count > 0) DrawSanta();
-            DrawGround();
-            foreach (var n in nisser) DrawNisse(n);
-            long t2 = clock.ElapsedTicks;
-            DrawSnow();
-            long t3 = clock.ElapsedTicks;
-            Present();
-            long t4 = clock.ElapsedTicks;
-            if (Environment.GetEnvironmentVariable("JULE_PROFILE") == "1")
-            {
-                prof[0] += t1 - t0; prof[1] += t2 - t1; prof[2] += t3 - t2; prof[3] += t4 - t3; profFrames++;
-                if (profFrames == 150)
+                int x0 = Math.Max(0, r.Left), x1 = Math.Min(W, r.Right);
+                int y0 = Math.Max(0, r.Top), y1 = Math.Min(H, r.Bottom);
+                if (x0 >= x1 || y0 >= y1) continue;
+                int n = x1 - x0;
+                for (int y = y0; y < y1; y++)
                 {
-                    double f = 1000.0 / Stopwatch.Frequency / profFrames;
-                    File.WriteAllText(Path.Combine(Path.GetTempPath(), "jule_profile.txt"),
-                        string.Format("clear {0:F2}ms  scene {1:F2}ms  snow {2:F2}ms  present {3:F2}ms  flakes {4}",
-                        prof[0] * f, prof[1] * f, prof[2] * f, prof[3] * f, flakes.Count));
+                    uint* p = buf + (long)y * W + x0;
+                    for (int i = 0; i < n; i++) p[i] = 0;
                 }
             }
         }
-        long[] prof = new long[4]; int profFrames;
 
-        bool IsFullscreenAppActive()
+        // ------------------------------------------------------------------ én frame
+        public void Frame(float dt)
         {
-            IntPtr fg = GetForegroundWindow();
-            if (fg == IntPtr.Zero || fg == Handle) return false;
-            var sb = new StringBuilder(256);
-            GetClassName(fg, sb, 256);
-            string c = sb.ToString();
-            if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false;
-            RECT r;
-            if (!GetWindowRect(fg, out r)) return false;
-            return r.Left <= bounds.Left && r.Top <= bounds.Top && r.Right >= bounds.Right && r.Bottom >= bounds.Bottom;
-        }
+            var fs = c.FullscreenRect;
+            if (!fs.IsEmpty && fs.Contains(ScreenBounds))
+            {
+                if (!paused) { ClearAll(); Present(); paused = true; prevDirty.Clear(); }
+                return;
+            }
+            paused = false;
 
-        float Rnd() { return (float)rnd.NextDouble(); }
+            UpdateSnow(dt);
+            UpdateNisser(dt);
+
+            ClearRects(prevDirty);
+            prevDirty.Clear();
+
+            if (cfg.Lights) DrawLights(dt);
+            DrawSantaAndSparks();
+            if (IsPrimary && cfg.Snowman) DrawSnowman(); else SnowmanPos = PointF.Empty;
+            DrawGround();
+            foreach (var n in nisser) DrawNisse(n);
+            DrawSnow();
+            Present();
+
+            var tmp = prevDirty; prevDirty = dirty; dirty = tmp;
+        }
 
         // ------------------------------------------------------------------ sne
         void UpdateSnow(float dt)
         {
             int[] baseCount = { 110, 260, 650 };
-            // antal fnug efter "logisk" skærmstørrelse, så høj-DPI skærme ikke får 3x så mange
             float logicalArea = W * (float)H / (dpiScale * dpiScale);
-            int target = cfg.Snow ? (int)(baseCount[cfg.SnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f))) : 0;
-            while (flakes.Count < target) flakes.Add(NewFlake(flakes.Count < target / 2 && time < 1f));
-            if (flakes.Count > target) flakes.RemoveRange(target, flakes.Count - target);
+            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f))) : 0;
+            // nye fnug kommer ind fra toppen; overskydende fnug forsvinder først når de lander
+            int add = flakes.Count == 0 ? target : Math.Max(1, target / 60);
+            for (int i = 0; i < add && flakes.Count < target; i++) flakes.Add(NewFlake(flakes.Count == 0 || c.Time < 1f));
 
-            windTimer -= dt;
-            if (windTimer <= 0)
-            {
-                windTimer = 3 + Rnd() * 6;
-                float range = cfg.SnowLevel == 2 ? 140 : 30;
-                windTarget = (Rnd() * 2 - 1) * range * S + (cfg.SnowLevel == 2 ? 60 * S : 0);
-            }
-            wind += (windTarget - wind) * Math.Min(1f, dt * 0.5f);
-
-            for (int i = 0; i < flakes.Count; i++)
+            float wind = c.Wind * S;
+            for (int i = flakes.Count - 1; i >= 0; i--)
             {
                 var f = flakes[i];
                 f.Y += f.Vy * dt;
-                f.X += (wind * (0.4f + f.R / (4 * S)) + (float)Math.Cos(time * f.SwaySpd + f.Phase) * f.Sway) * dt;
+                f.X += (wind * (0.4f + f.R / (4 * S)) + (float)Math.Cos(c.Time * f.SwaySpd + f.Phase) * f.Sway) * dt;
                 f.Rot += f.RotSpd * dt;
                 if (f.X < -60) f.X += W + 120; else if (f.X > W + 60) f.X -= W + 120;
                 if (f.Y >= groundY - HeapAt(f.X))
                 {
                     if (cfg.SnowGround) Deposit(f.X, f.R);
-                    flakes[i] = NewFlake(false);
+                    if (flakes.Count > target) flakes.RemoveAt(i);
+                    else flakes[i] = NewFlake(false);
                 }
             }
 
-            // sne på proceslinjen: udglatning og (evt.) smeltning
             float maxH = 18 * S, slope = 1.2f * S;
             for (int i = 0; i < heap.Length - 1; i++)
             {
@@ -408,7 +253,7 @@ namespace JuleHygge
                 if (d > slope) { float m = (d - slope) * 0.3f; heap[i] -= m; heap[i + 1] += m; }
                 else if (d < -slope) { float m = (-d - slope) * 0.3f; heap[i] += m; heap[i + 1] -= m; }
             }
-            bool melt = !cfg.Snow || !cfg.SnowGround;
+            bool melt = !c.SnowOn || !cfg.SnowGround;
             for (int i = 0; i < heap.Length; i++)
             {
                 if (melt) heap[i] = Math.Max(0, heap[i] - 3 * S * dt);
@@ -421,7 +266,7 @@ namespace JuleHygge
             var f = new Flake();
             float depth = Rnd();
             f.R = (1f + depth * depth * 3.5f) * S;
-            f.Vy = (25f + depth * 55f + Rnd() * 15f) * S * (cfg.SnowLevel == 2 ? 1.5f : 1f);
+            f.Vy = (25f + depth * 55f + Rnd() * 15f) * S * (c.EffectiveSnowLevel == 2 ? 1.5f : 1f);
             f.X = rnd.Next(-50, W + 50);
             f.Y = anywhere ? Rnd() * groundY : -10 - Rnd() * 60;
             f.Phase = Rnd() * 6.28f;
@@ -438,7 +283,7 @@ namespace JuleHygge
         void Deposit(float x, float r)
         {
             int idx = (int)(x / HeapStep);
-            float amount = 0.35f * r / S * S;
+            float amount = 0.35f * r;
             for (int k = -1; k <= 1; k++)
             {
                 int j = idx + k;
@@ -456,16 +301,7 @@ namespace JuleHygge
             return heap[i] * (1 - t) + heap[i + 1] * t;
         }
 
-        [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
-        static extern IntPtr memset(IntPtr dest, int c, UIntPtr count);
-
-        void ClearCanvas()
-        {
-            g.Flush(FlushIntention.Sync);
-            memset(pixels, 0, new UIntPtr((ulong)W * (ulong)H * 4));
-        }
-
-        // Tegner en blød, hvid prik direkte i den præmultiplicerede pixelbuffer (meget hurtigere end GDI+)
+        // blød hvid prik direkte i den præmultiplicerede pixelbuffer (meget hurtigere end GDI+)
         unsafe void BlendDot(float cx, float cy, float r, int alpha)
         {
             int x0 = Math.Max(0, (int)(cx - r - 1)), x1 = Math.Min(W - 1, (int)(cx + r + 1));
@@ -499,21 +335,21 @@ namespace JuleHygge
         {
             g.Flush(FlushIntention.Sync);
             foreach (var f in flakes)
+            {
+                if (f.Y < -f.R * 2) continue;
+                Mark(f.X - f.R, f.Y - f.R, f.R * 2, f.R * 2);
                 if (!f.Crystal) BlendDot(f.X, f.Y, f.R, f.A);
-
+            }
             foreach (var f in flakes)
             {
-                int bi = Math.Max(0, Math.Min(15, (f.A - 60) / 13));
-                if (f.Crystal)
+                if (!f.Crystal || f.Y < -f.R * 2) continue;
+                var pen = flakePens[Math.Max(0, Math.Min(15, (f.A - 60) / 13))];
+                pen.Width = Math.Max(1f, 0.9f * S);
+                for (int k = 0; k < 3; k++)
                 {
-                    var pen = flakePens[bi];
-                    pen.Width = Math.Max(1f, 0.9f * S);
-                    for (int k = 0; k < 3; k++)
-                    {
-                        float a = f.Rot + k * 1.0472f;
-                        float dx = (float)Math.Cos(a) * f.R, dy = (float)Math.Sin(a) * f.R;
-                        g.DrawLine(pen, f.X - dx, f.Y - dy, f.X + dx, f.Y + dy);
-                    }
+                    float a = f.Rot + k * 1.0472f;
+                    float dx = (float)Math.Cos(a) * f.R, dy = (float)Math.Sin(a) * f.R;
+                    g.DrawLine(pen, f.X - dx, f.Y - dy, f.X + dx, f.Y + dy);
                 }
             }
         }
@@ -523,6 +359,7 @@ namespace JuleHygge
             float max = 0;
             for (int i = 0; i < heap.Length; i++) if (heap[i] > max) max = heap[i];
             if (max < 0.5f) return;
+            Mark(0, groundY - max - 4 * S, W, max + 8 * S);
             var pts = new PointF[heap.Length + 2];
             for (int i = 0; i < heap.Length; i++) pts[i] = new PointF(i * HeapStep, groundY - heap[i]);
             pts[heap.Length] = new PointF(W, groundY + 1);
@@ -536,79 +373,42 @@ namespace JuleHygge
             }
         }
 
-        // ------------------------------------------------------------------ julemanden
-        void LaunchSanta()
+        // ------------------------------------------------------------------ julemanden og gnister
+        void DrawSantaAndSparks()
         {
-            santaActive = true;
-            santaDir = Rnd() < 0.5f ? 1 : -1;
-            santaX = santaDir > 0 ? -420 * S : W + 420 * S;
-            santaY0 = H * (0.12f + Rnd() * 0.25f);
-            santaSpeed = (190 + Rnd() * 80) * S;
-            santaPhase = 0;
-        }
-
-        float SantaY() { return santaY0 + (float)Math.Sin(santaPhase * 0.9) * 40 * S; }
-
-        void UpdateSanta(float dt)
-        {
-            if (!santaActive)
+            float ox = ScreenBounds.X, oy = ScreenBounds.Y;
+            foreach (var sp in c.Sparks)
             {
-                if (cfg.Santa) { santaNext -= dt; if (santaNext <= 0) LaunchSanta(); }
-            }
-            else
-            {
-                santaX += santaDir * santaSpeed * dt;
-                santaPhase += dt;
-                sparkAcc += dt * 45;
-                while (sparkAcc >= 1)
+                float x = sp.X - ox, y = sp.Y - oy;
+                if (x < -20 || y < -20 || x > W + 20 || y > H + 20) continue;
+                float life = sp.Star ? Math.Min(1f, sp.Life) : sp.Life / sp.Max;
+                int a = (int)(255 * life);
+                Color col = sp.Gold ? Color.FromArgb(a, 255, 220, 120) : Color.FromArgb(a, 255, 255, 255);
+                Mark(x - sp.Size * 1.6f, y - sp.Size * 1.6f, sp.Size * 3.2f, sp.Size * 3.2f);
+                using (var b = new SolidBrush(col))
                 {
-                    sparkAcc -= 1;
-                    var sp = new Spark();
-                    sp.X = santaX - santaDir * 90 * S + (Rnd() - 0.5f) * 10 * S;
-                    sp.Y = SantaY() + (Rnd() - 0.3f) * 20 * S;
-                    sp.VX = -santaDir * (10 + Rnd() * 30) * S;
-                    sp.VY = (Rnd() - 0.5f) * 20 * S;
-                    sp.Max = sp.Life = 0.8f + Rnd() * 1.4f;
-                    sp.Size = (1.5f + Rnd() * 3f) * S;
-                    sp.Gold = Rnd() < 0.6f;
-                    sparks.Add(sp);
+                    if (sp.Star) g.FillPolygon(b, StarPoints(x, y, sp.Size, sp.Size * 0.45f, sp.Life));
+                    else g.FillEllipse(b, x - sp.Size / 2, y - sp.Size / 2, sp.Size, sp.Size);
                 }
-                if ((santaDir > 0 && santaX > W + 450 * S) || (santaDir < 0 && santaX < -450 * S))
-                {
-                    santaActive = false;
-                    santaNext = 60 + Rnd() * 120;
-                }
-            }
-            for (int i = sparks.Count - 1; i >= 0; i--)
-            {
-                var sp = sparks[i];
-                sp.Life -= dt;
-                if (sp.Life <= 0) { sparks.RemoveAt(i); continue; }
-                sp.X += sp.VX * dt; sp.Y += sp.VY * dt; sp.VY += 12 * S * dt;
-            }
-        }
-
-        void DrawSanta()
-        {
-            foreach (var sp in sparks)
-            {
-                int a = (int)(255 * sp.Life / sp.Max);
-                Color c = sp.Gold ? Color.FromArgb(a, 255, 220, 120) : Color.FromArgb(a, 255, 255, 255);
-                using (var b = new SolidBrush(c)) g.FillEllipse(b, sp.X - sp.Size / 2, sp.Y - sp.Size / 2, sp.Size, sp.Size);
-                if (sp.Size > 3.5f * S)
-                    using (var p = new Pen(c, 1f))
+                if (!sp.Star && sp.Size > 3.5f * S)
+                    using (var p = new Pen(col, 1f))
                     {
-                        g.DrawLine(p, sp.X - sp.Size * 1.5f, sp.Y, sp.X + sp.Size * 1.5f, sp.Y);
-                        g.DrawLine(p, sp.X, sp.Y - sp.Size * 1.5f, sp.X, sp.Y + sp.Size * 1.5f);
+                        g.DrawLine(p, x - sp.Size * 1.5f, y, x + sp.Size * 1.5f, y);
+                        g.DrawLine(p, x, y - sp.Size * 1.5f, x, y + sp.Size * 1.5f);
                     }
             }
-            if (!santaActive) return;
+            if (!c.SantaActive) return;
+
+            float sc = c.SantaScale * 1.1f;
+            float sx = c.SantaX - ox, sy = c.SantaY - oy;
+            if (sx < -330 * sc || sx > W + 330 * sc || sy < -150 * sc || sy > H + 150 * sc) return;
+            Mark(sx - 330 * sc, sy - 135 * sc, 660 * sc, 195 * sc);
 
             var st = g.Save();
-            g.TranslateTransform(santaX, SantaY());
-            g.ScaleTransform(santaDir * S * 1.1f, S * 1.1f);
-            g.RotateTransform((float)Math.Cos(santaPhase * 0.9) * -4f * santaDir);
-            float t = santaPhase;
+            g.TranslateTransform(sx, sy);
+            g.ScaleTransform(c.SantaDir * sc, sc);
+            g.RotateTransform((float)Math.Cos(c.SantaPhase * 0.9) * -4f * c.SantaDir);
+            float t = c.SantaPhase;
 
             float[] rx = { 80, 140, 200, 260 };
             float[] ry = new float[4];
@@ -625,13 +425,11 @@ namespace JuleHygge
             using (var sack = new SolidBrush(Color.FromArgb(150, 110, 60)))
             using (var gold = new SolidBrush(Gold))
             {
-                // sæk med gaver
                 g.FillEllipse(sack, -92, -66, 36, 40);
                 using (var gb = new SolidBrush(Color.FromArgb(40, 140, 70))) g.FillRectangle(gb, -84, -74, 12, 12);
                 using (var gb = new SolidBrush(Color.FromArgb(60, 100, 200))) g.FillRectangle(gb, -72, -70, 10, 9);
                 g.FillRectangle(gold, -79, -74, 2, 12);
 
-                // julemanden
                 g.FillEllipse(red, -52, -58, 32, 42);
                 using (var arm = new Pen(SantaRed, 7f)) { arm.StartCap = arm.EndCap = LineCap.Round; g.DrawLine(arm, -32, -48, -16, -44); }
                 g.FillEllipse(black, -19, -48, 8, 8);
@@ -645,7 +443,6 @@ namespace JuleHygge
                 g.FillEllipse(white, -61, -91, 9, 9);
             }
 
-            // kanen
             using (var path = new GraphicsPath())
             {
                 path.AddBezier(-82, -46, -70, -36, -78, -4, -60, 2);
@@ -669,6 +466,18 @@ namespace JuleHygge
                 g.DrawBezier(p, -72, 12, -80, 12, -80, 4, -74, 4);
             }
             g.Restore(st);
+        }
+
+        static PointF[] StarPoints(float cx, float cy, float outer, float inner, float rot)
+        {
+            var p = new PointF[10];
+            for (int i = 0; i < 10; i++)
+            {
+                double a = -Math.PI / 2 + i * Math.PI / 5 + rot;
+                float r = i % 2 == 0 ? outer : inner;
+                p[i] = new PointF(cx + (float)Math.Cos(a) * r, cy + (float)Math.Sin(a) * r);
+            }
+            return p;
         }
 
         void DrawReindeer(float x, float y, float phase, bool rudolph, float t)
@@ -723,11 +532,111 @@ namespace JuleHygge
             g.DrawLine(p, hx, hy, hx + (float)Math.Sin(a) * 15, hy + (float)Math.Cos(a) * 15);
         }
 
+        // ------------------------------------------------------------------ snemand (bygges lidt mere hver dag)
+        void DrawSnowman()
+        {
+            int stage = c.SnowmanStage;
+            float x = W * 0.78f, y = groundY - HeapAt(x) + 3 * S;
+            SnowmanPos = new PointF(ScreenBounds.X + x, ScreenBounds.Y + y);
+            Mark(x - 62 * S, y - 135 * S, 124 * S, 142 * S);
+
+            var st = g.Save();
+            g.TranslateTransform(x, y);
+            g.ScaleTransform(S, S);
+
+            using (var shadow = new SolidBrush(Color.FromArgb(50, 60, 80, 110))) g.FillEllipse(shadow, -30, -3, 60, 6);
+            using (var wood = new Pen(Color.FromArgb(110, 70, 35), 2.6f))
+            {
+                wood.StartCap = wood.EndCap = LineCap.Round;
+                if (stage >= 12)
+                {
+                    g.DrawLine(wood, 32, -6, 46, -104);
+                    using (var straw = new SolidBrush(Color.FromArgb(215, 175, 90)))
+                        g.FillPolygon(straw, new[] { new PointF(24, 6), new PointF(42, 6), new PointF(37, -14), new PointF(31, -14) });
+                    using (var bind = new Pen(Color.FromArgb(170, 30, 30), 2f)) g.DrawLine(bind, 30, -11, 38, -11);
+                }
+                if (stage >= 8)
+                {
+                    g.DrawLine(wood, -15, -66, -40, -84);
+                    g.DrawLine(wood, -33, -79, -37, -91);
+                    g.DrawLine(wood, -33, -79, -44, -78);
+                    g.DrawLine(wood, 15, -66, 40, -80);
+                    g.DrawLine(wood, 33, -76, 39, -88);
+                }
+            }
+
+            if (stage == 1) Ball(0, -11, 11); else Ball(0, -24, 25);
+            if (stage >= 3) Ball(0, -62, 18);
+            if (stage >= 4) Ball(0, -92, 13);
+
+            using (var coal = new SolidBrush(Color.FromArgb(35, 35, 40)))
+            {
+                if (stage >= 7) for (int i = 0; i < 3; i++) g.FillEllipse(coal, -2.4f, -72.4f + i * 9, 4.8f, 4.8f);
+                if (stage >= 10)
+                {
+                    using (var scarf = new SolidBrush(Color.FromArgb(200, 30, 40)))
+                    {
+                        g.FillRectangle(scarf, -13, -82, 26, 6);
+                        g.FillPolygon(scarf, new[] { new PointF(5, -78), new PointF(12, -78), new PointF(15, -57), new PointF(8, -57) });
+                    }
+                    using (var stripe = new Pen(Color.White, 1.5f))
+                    {
+                        g.DrawLine(stripe, 9, -66, 14, -66);
+                        g.DrawLine(stripe, 10, -61, 15, -61);
+                    }
+                }
+                if (stage >= 5)
+                {
+                    g.FillEllipse(coal, -6.5f, -98, 4, 4);
+                    g.FillEllipse(coal, 2.5f, -98, 4, 4);
+                }
+                if (stage >= 6)
+                    using (var carrot = new SolidBrush(Color.FromArgb(240, 130, 30)))
+                        g.FillPolygon(carrot, new[] { new PointF(0, -93), new PointF(19, -89.5f), new PointF(0, -87) });
+                if (stage >= 9)
+                    for (int i = -2; i <= 2; i++)
+                    {
+                        float sx = i * 3f, sy = -86 + 2 * (1 - (sx / 6) * (sx / 6)) + 1;
+                        g.FillEllipse(coal, sx - 1.1f, sy - 1.1f, 2.2f, 2.2f);
+                    }
+                if (stage >= 11)
+                {
+                    g.FillRectangle(coal, -15, -106, 30, 4);
+                    g.FillRectangle(coal, -10, -127, 20, 22);
+                    using (var band = new SolidBrush(Color.FromArgb(200, 30, 40))) g.FillRectangle(band, -10, -110, 20, 4);
+                }
+            }
+            if (stage >= 12)
+            {
+                using (var gift = new SolidBrush(Color.FromArgb(40, 140, 70))) g.FillRectangle(gift, -50, -13, 15, 13);
+                using (var rib = new Pen(Gold, 1.8f))
+                {
+                    g.DrawLine(rib, -42.5f, -13, -42.5f, 0);
+                    g.DrawLine(rib, -50, -6.5f, -35, -6.5f);
+                    g.DrawEllipse(rib, -46, -17, 3.5f, 3.5f);
+                    g.DrawEllipse(rib, -42.5f, -17, 3.5f, 3.5f);
+                }
+            }
+            g.Restore(st);
+        }
+
+        void Ball(float cx, float cy, float r)
+        {
+            var rc = new RectangleF(cx - r, cy - r, 2 * r, 2 * r);
+            using (var b = new LinearGradientBrush(rc, Color.White, Color.FromArgb(200, 216, 238), 50f)) g.FillEllipse(b, rc);
+            using (var p = new Pen(Color.FromArgb(70, 140, 165, 200), 1f)) g.DrawEllipse(p, rc);
+        }
+
         // ------------------------------------------------------------------ nisser
         static readonly Color[] Tunics = {
             Color.FromArgb(115, 120, 130), Color.FromArgb(40, 105, 65), Color.FromArgb(150, 35, 45), Color.FromArgb(70, 85, 145) };
         static readonly Color[] Gifts = {
             Color.FromArgb(40, 140, 70), Color.FromArgb(60, 100, 200), Color.FromArgb(200, 40, 60), Color.FromArgb(150, 80, 180) };
+
+        public void NisseWave(float seconds)
+        {
+            foreach (var n in nisser) { n.State = 2; n.StateTimer = seconds; }
+        }
 
         void UpdateNisser(float dt)
         {
@@ -778,9 +687,13 @@ namespace JuleHygge
 
         void DrawNisse(Nisse n)
         {
+            float sc = S * n.Size;
+            float gy = groundY - HeapAt(n.X) + 2 * S;
+            Mark(n.X - 32 * sc, gy - 72 * sc, 64 * sc, 80 * sc);
+
             var st = g.Save();
-            g.TranslateTransform(n.X, groundY - HeapAt(n.X) + 2 * S);
-            g.ScaleTransform(n.Dir * S * n.Size, S * n.Size);
+            g.TranslateTransform(n.X, gy);
+            g.ScaleTransform(n.Dir * sc, sc);
 
             bool walking = n.State == 0;
             float p = n.WalkPhase;
@@ -871,9 +784,7 @@ namespace JuleHygge
             Color.FromArgb(255, 60, 60), Color.FromArgb(60, 220, 90), Color.FromArgb(255, 200, 60),
             Color.FromArgb(80, 150, 255), Color.FromArgb(255, 110, 200) };
 
-        Bitmap lightsBmp; float lightsTimer;
-
-        void DrawLights()
+        void DrawLights(float dt)
         {
             int lh = (int)(70 * S);
             if (lightsBmp == null || lightsBmp.Width != W || lightsBmp.Height != lh)
@@ -882,25 +793,24 @@ namespace JuleHygge
                 lightsBmp = new Bitmap(W, lh, PixelFormat.Format32bppPArgb);
                 lightsTimer = 0;
             }
-            lightsTimer -= 0.033f;
+            lightsTimer -= dt;
             if (lightsTimer <= 0)
             {
                 lightsTimer = 0.1f;
-                var main = g;
-                using (g = Graphics.FromImage(lightsBmp))
+                using (var lg = Graphics.FromImage(lightsBmp))
                 {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.Clear(Color.Transparent);
-                    RenderLights();
+                    lg.SmoothingMode = SmoothingMode.AntiAlias;
+                    lg.Clear(Color.Transparent);
+                    RenderLights(lg);
                 }
-                g = main;
             }
             g.CompositingMode = CompositingMode.SourceCopy;
             g.DrawImageUnscaled(lightsBmp, 0, 0);
             g.CompositingMode = CompositingMode.SourceOver;
+            Mark(0, 0, W, lh);
         }
 
-        void RenderLights()
+        void RenderLights(Graphics lg)
         {
             float span = 230 * S, sag = 22 * S, top = 1;
             int perSpan = 4, idx = 0;
@@ -915,167 +825,26 @@ namespace JuleHygge
                         float u = k / 12f;
                         pts[k] = new PointF(x0 + u * span, top + sag * (1 - (2 * u - 1) * (2 * u - 1)));
                     }
-                    g.DrawCurve(wire, pts);
+                    lg.DrawCurve(wire, pts);
 
                     for (int b = 0; b < perSpan; b++, idx++)
                     {
                         float u = (b + 0.5f) / perSpan;
                         float bx = x0 + u * span, by = top + sag * (1 - (2 * u - 1) * (2 * u - 1));
-                        Color c = BulbColors[idx % BulbColors.Length];
-                        float br = 0.55f + 0.45f * (float)Math.Sin(time * (1.3 + (idx * 37 % 10) * 0.12) + idx * 1.7);
+                        Color col = BulbColors[idx % BulbColors.Length];
+                        float br = 0.55f + 0.45f * (float)Math.Sin(c.Time * (1.3 + (idx * 37 % 10) * 0.12) + idx * 1.7);
                         float w = 7 * S, h = 11 * S;
-                        using (var glow = new SolidBrush(Color.FromArgb((int)(70 * br), c)))
-                            g.FillEllipse(glow, bx - 13 * S, by + 1 * S, 26 * S, 26 * S);
-                        g.FillRectangle(socket, bx - 2.5f * S, by, 5 * S, 4 * S);
+                        using (var glow = new SolidBrush(Color.FromArgb((int)(70 * br), col)))
+                            lg.FillEllipse(glow, bx - 13 * S, by + 1 * S, 26 * S, 26 * S);
+                        lg.FillRectangle(socket, bx - 2.5f * S, by, 5 * S, 4 * S);
                         Color bc = Color.FromArgb(255,
-                            (int)(c.R * (0.5f + 0.5f * br)), (int)(c.G * (0.5f + 0.5f * br)), (int)(c.B * (0.5f + 0.5f * br)));
-                        using (var bulb = new SolidBrush(bc)) g.FillEllipse(bulb, bx - w / 2, by + 3 * S, w, h);
+                            (int)(col.R * (0.5f + 0.5f * br)), (int)(col.G * (0.5f + 0.5f * br)), (int)(col.B * (0.5f + 0.5f * br)));
+                        using (var bulb = new SolidBrush(bc)) lg.FillEllipse(bulb, bx - w / 2, by + 3 * S, w, h);
                         using (var shine = new SolidBrush(Color.FromArgb((int)(160 * br), 255, 255, 255)))
-                            g.FillEllipse(shine, bx - w / 4, by + 5 * S, w / 3, h / 3);
+                            lg.FillEllipse(shine, bx - w / 4, by + 5 * S, w / 3, h / 3);
                     }
                 }
             }
-        }
-
-        // ------------------------------------------------------------------ bakkeikon og menu
-        void BuildTray()
-        {
-            tray = new NotifyIcon();
-            tray.Icon = MakeIcon();
-            tray.Text = "Jule-hygge";
-            tray.Visible = true;
-            tray.DoubleClick += (s, e) => { if (!santaActive) LaunchSanta(); };
-
-            var menu = new ContextMenuStrip();
-            countdownItem = new ToolStripMenuItem(Countdown());
-            countdownItem.Enabled = false;
-            menu.Items.Add(countdownItem);
-            menu.Items.Add(new ToolStripSeparator());
-
-            menu.Items.Add(Toggle("Snevejr", () => cfg.Snow, v => cfg.Snow = v));
-            var level = new ToolStripMenuItem("Snemængde");
-            string[] names = { "Let sne", "Normal", "Snestorm" };
-            for (int i = 0; i < names.Length; i++)
-            {
-                int li = i;
-                var it = new ToolStripMenuItem(names[i]);
-                it.Checked = cfg.SnowLevel == li;
-                it.Click += (s, e) =>
-                {
-                    cfg.SnowLevel = li;
-                    foreach (ToolStripMenuItem o in level.DropDownItems) o.Checked = o == it;
-                    flakes.Clear();
-                    cfg.Save();
-                };
-                level.DropDownItems.Add(it);
-            }
-            menu.Items.Add(level);
-            menu.Items.Add(Toggle("Sne på proceslinjen", () => cfg.SnowGround, v => cfg.SnowGround = v));
-            menu.Items.Add(new ToolStripSeparator());
-
-            menu.Items.Add(Toggle("Julemanden", () => cfg.Santa, v => cfg.Santa = v));
-            var send = new ToolStripMenuItem("Send julemanden afsted nu!");
-            send.Click += (s, e) => { if (!santaActive) LaunchSanta(); };
-            menu.Items.Add(send);
-            menu.Items.Add(new ToolStripSeparator());
-
-            menu.Items.Add(Toggle("Nisser", () => cfg.Nisser, v => cfg.Nisser = v));
-            var count = new ToolStripMenuItem("Antal nisser");
-            foreach (int c in new[] { 1, 2, 3, 5, 8, 12 })
-            {
-                int ci = c;
-                var it = new ToolStripMenuItem(c.ToString());
-                it.Checked = cfg.NisseCount == ci;
-                it.Click += (s, e) =>
-                {
-                    cfg.NisseCount = ci;
-                    foreach (ToolStripMenuItem o in count.DropDownItems) o.Checked = o == it;
-                    cfg.Save();
-                };
-                count.DropDownItems.Add(it);
-            }
-            menu.Items.Add(count);
-            menu.Items.Add(new ToolStripSeparator());
-
-            menu.Items.Add(Toggle("Julelys", () => cfg.Lights, v => cfg.Lights = v));
-            menu.Items.Add(Toggle("Pause ved fuldskærm (spil/film)", () => cfg.PauseFullscreen, v => cfg.PauseFullscreen = v));
-            menu.Items.Add(Toggle("Start med Windows", GetAutostart, SetAutostart));
-            menu.Items.Add(new ToolStripSeparator());
-
-            var exit = new ToolStripMenuItem("Afslut");
-            exit.Click += (s, e) => Close();
-            menu.Items.Add(exit);
-
-            menu.Opening += (s, e) => countdownItem.Text = Countdown();
-            tray.ContextMenuStrip = menu;
-        }
-
-        ToolStripMenuItem Toggle(string text, Func<bool> get, Action<bool> set)
-        {
-            var item = new ToolStripMenuItem(text);
-            item.Checked = get();
-            item.CheckOnClick = true;
-            item.CheckedChanged += (s, e) => { set(item.Checked); cfg.Save(); };
-            return item;
-        }
-
-        static string Countdown()
-        {
-            var today = DateTime.Today;
-            var eve = new DateTime(today.Year, 12, 24);
-            if (today > eve) eve = eve.AddYears(1);
-            int d = (int)(eve - today).TotalDays;
-            if (d == 0) return "★ Glædelig jul! ★";
-            if (d == 1) return "★ 1 dag til juleaften ★";
-            return "★ " + d + " dage til juleaften ★";
-        }
-
-        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        static bool GetAutostart()
-        {
-            using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
-                return k != null && k.GetValue("JuleHygge") != null;
-        }
-        static void SetAutostart(bool on)
-        {
-            using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
-            {
-                if (k == null) return;
-                if (on) k.SetValue("JuleHygge", "\"" + Application.ExecutablePath + "\"");
-                else k.DeleteValue("JuleHygge", false);
-            }
-        }
-
-        static Icon MakeIcon()
-        {
-            var bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb);
-            using (var gg = Graphics.FromImage(bmp))
-            {
-                gg.SmoothingMode = SmoothingMode.AntiAlias;
-                gg.Clear(Color.Transparent);
-                using (var b = new SolidBrush(Color.FromArgb(200, 25, 35))) gg.FillEllipse(b, 1, 1, 30, 30);
-                using (var p = new Pen(Color.White, 2.2f))
-                {
-                    p.StartCap = p.EndCap = LineCap.Round;
-                    for (int k = 0; k < 3; k++)
-                    {
-                        double a = k * Math.PI / 3 + Math.PI / 2;
-                        float dx = (float)Math.Cos(a) * 11, dy = (float)Math.Sin(a) * 11;
-                        gg.DrawLine(p, 16 - dx, 16 - dy, 16 + dx, 16 + dy);
-                        for (int sgn = -1; sgn <= 1; sgn += 2)
-                        {
-                            float ex = 16 + sgn * dx * 0.65f, ey = 16 + sgn * dy * 0.65f;
-                            double a1 = a + (sgn > 0 ? 0 : Math.PI);
-                            for (int side = -1; side <= 1; side += 2)
-                            {
-                                double ba = a1 + side * 2.4;
-                                gg.DrawLine(p, ex, ey, ex + (float)Math.Cos(ba) * 4, ey + (float)Math.Sin(ba) * 4);
-                            }
-                        }
-                    }
-                }
-            }
-            return Icon.FromHandle(bmp.GetHicon());
         }
     }
 }

@@ -5,5 +5,5 @@ if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framewo
 $out = Join-Path $PSScriptRoot 'JuleHygge.exe'
 & $csc /nologo /codepage:65001 /target:winexe /optimize+ /unsafe /platform:anycpu /out:$out `
     /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    (Join-Path $PSScriptRoot 'src\JuleHygge.cs')
+    (Join-Path $PSScriptRoot 'src\*.cs')
 if ($LASTEXITCODE -eq 0) { Write-Host "Bygget: $out" }
