@@ -27,16 +27,27 @@ namespace JuleHygge
         {
             var s = new Settings();
             var d = new Dictionary<string, string>();
-            try
+            // The file can be briefly locked (OneDrive, antivirus), so retry a few times. If it still
+            // cannot be read, run on defaults but never save, so the user's real file is not overwritten.
+            if (File.Exists(FilePath))
             {
-                if (File.Exists(FilePath))
-                    foreach (var line in File.ReadAllLines(FilePath))
+                s.loadFailed = true;
+                for (int attempt = 0; attempt < 5 && s.loadFailed; attempt++)
+                {
+                    try
                     {
-                        int i = line.IndexOf('=');
-                        if (i > 0) d[line.Substring(0, i).Trim()] = line.Substring(i + 1).Trim();
+                        d.Clear();
+                        foreach (var line in File.ReadAllLines(FilePath))
+                        {
+                            int i = line.IndexOf('=');
+                            if (i > 0) d[line.Substring(0, i).Trim()] = line.Substring(i + 1).Trim();
+                        }
+                        s.loadFailed = false;
                     }
+                    catch (IOException) { System.Threading.Thread.Sleep(200); }
+                    catch (UnauthorizedAccessException) { System.Threading.Thread.Sleep(200); }
+                }
             }
-            catch { }
 
             s.Snow = B(d, "Snow", s.Snow);
             s.SnowGround = B(d, "SnowGround", s.SnowGround);
@@ -64,12 +75,17 @@ namespace JuleHygge
             return s;
         }
 
+        bool loadFailed;
+
         public void Save()
         {
+            if (loadFailed) return;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-                File.WriteAllLines(FilePath, new[] {
+                // Write to a temp file first and swap it in, so a crash mid-write never leaves a half file.
+                string tmp = FilePath + ".tmp";
+                File.WriteAllLines(tmp, new[] {
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
                     "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow),
@@ -77,6 +93,8 @@ namespace JuleHygge
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),
                     "OpenedDoors=" + string.Join(",", OpenedDoors.OrderBy(x => x)) });
+                if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
+                else File.Move(tmp, FilePath);
             }
             catch { }
         }

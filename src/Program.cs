@@ -19,6 +19,10 @@ namespace JuleHygge
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                // A decoration must never pop up crash dialogs: log UI-thread exceptions and keep running.
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += (s, e) => ErrorLog.Write(e.Exception);
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => ErrorLog.Write(e.ExceptionObject as Exception);
                 var controller = new Controller();
                 if (Array.IndexOf(args, "--kalender") >= 0) controller.ShowCalendar();
                 // --sneplov sends the snow plow after 3 s; --sneplov=N after N seconds (handy for testing).
@@ -34,6 +38,24 @@ namespace JuleHygge
                 }
                 Application.Run(controller);
             }
+        }
+    }
+
+    // Appends errors to %TEMP%\julehygge-error.log, with a cap so a repeating error cannot grow it forever.
+    static class ErrorLog
+    {
+        static int written;
+
+        public static void Write(Exception ex)
+        {
+            if (ex == null || written >= 200) return;
+            written++;
+            try
+            {
+                System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "julehygge-error.log"),
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " " + ex + Environment.NewLine + Environment.NewLine);
+            }
+            catch { }
         }
     }
 

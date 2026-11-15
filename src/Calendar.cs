@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Windows.Forms;
 
@@ -97,20 +98,53 @@ namespace JuleHygge
 
             anim = new Timer();
             anim.Interval = 40;
-            anim.Tick += (s, e) =>
-            {
-                pulse += 0.04f;
-                for (int d = 1; d <= 24; d++)
-                    if (openAnim[d] > 0 && openAnim[d] < 1) openAnim[d] = Math.Min(1, openAnim[d] + 0.07f);
-                Invalidate();
-            };
+            anim.Tick += (s, e) => AnimTick();
             anim.Start();
+        }
+
+        // Fonts are created once instead of on every paint.
+        readonly Font titleFont = new Font("Georgia", 24, FontStyle.Bold);
+        readonly Font messageFont = new Font("Segoe UI", 12);
+        readonly Font cornerFont = new Font("Georgia", 9, FontStyle.Bold);
+        readonly Font numberFont = new Font("Georgia", 26, FontStyle.Bold);
+
+        // Repaints only doors that are actually moving: an opening door, or an openable door whose gold
+        // border pulses. Nothing is repainted while the window is minimized or when all is still.
+        void AnimTick()
+        {
+            if (WindowState == FormWindowState.Minimized) return;
+            pulse += 0.04f;
+            // The pulse is slow, so its doors are repainted every other tick (12.5 fps) to save CPU.
+            bool pulseFrame = (++tickCount & 1) == 0;
+            int upTo = CalendarContent.OpenableUpTo(JuleClock.Today);
+            for (int d = 1; d <= 24; d++)
+            {
+                if (openAnim[d] > 0 && openAnim[d] < 1)
+                {
+                    openAnim[d] = Math.Min(1, openAnim[d] + 0.07f);
+                    InvalidateDoor(d);
+                }
+                else if (pulseFrame && d <= upTo && !c.Cfg.OpenedDoors.Contains(d)) InvalidateDoor(d);
+            }
+        }
+        int tickCount;
+
+        void InvalidateDoor(int d)
+        {
+            var r = doors[d];
+            r.Inflate(8 * k, 8 * k);
+            Invalidate(Rectangle.Round(r));
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             anim.Stop();
             anim.Dispose();
+            titleFont.Dispose();
+            messageFont.Dispose();
+            cornerFont.Dispose();
+            numberFont.Dispose();
+            if (background != null) background.Dispose();
             base.OnFormClosed(e);
         }
 
@@ -180,10 +214,43 @@ namespace JuleHygge
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
+            var cr = ClientRectangle;
+            var clip = e.ClipRectangle;
+
+            // The static background (gradient, snow dots, title) is rendered once and then just copied.
+            if (background == null || background.Size != cr.Size)
+            {
+                if (background != null) background.Dispose();
+                background = new Bitmap(cr.Width, cr.Height, PixelFormat.Format32bppPArgb);
+                using (var bgG = Graphics.FromImage(background)) RenderBackground(bgG, cr);
+            }
+            g.DrawImage(background, clip, clip, GraphicsUnit.Pixel);
+
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            var cr = ClientRectangle;
 
+            // Only doors inside the repainted area are drawn (the animation repaints single doors).
+            var today = JuleClock.Today;
+            int upTo = CalendarContent.OpenableUpTo(today);
+            for (int d = 1; d <= 24; d++)
+                if (Rectangle.Round(RectangleF.Inflate(doors[d], 8 * k, 8 * k)).IntersectsWith(clip)) DrawDoor(g, d, upTo);
+
+            var mr = new RectangleF(40 * k, 605 * k, cr.Width - 80 * k, 95 * k);
+            if (!Rectangle.Round(mr).IntersectsWith(clip)) return;
+            using (var p = Rounded(mr, 12 * k))
+            using (var b = new SolidBrush(Color.FromArgb(45, 255, 255, 255)))
+                g.FillPath(b, p);
+            using (var b = new SolidBrush(Color.White))
+            using (var sf = new StringFormat { LineAlignment = StringAlignment.Center })
+                g.DrawString(message, messageFont, b, RectangleF.Inflate(mr, -18 * k, -8 * k), sf);
+        }
+
+        Bitmap background;
+
+        void RenderBackground(Graphics g, Rectangle cr)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var bg = new LinearGradientBrush(cr, Color.FromArgb(24, 72, 46), Color.FromArgb(8, 28, 18), 90f)) g.FillRectangle(bg, cr);
             var r = new Random(7);
             using (var sb = new SolidBrush(Color.FromArgb(55, 255, 255, 255)))
@@ -192,24 +259,9 @@ namespace JuleHygge
                     float rad = (1 + (float)r.NextDouble() * 2.5f) * k;
                     g.FillEllipse(sb, (float)r.NextDouble() * cr.Width, (float)r.NextDouble() * cr.Height, rad * 2, rad * 2);
                 }
-
-            using (var f = new Font("Georgia", 24, FontStyle.Bold))
             using (var b = new SolidBrush(GoldC))
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString(Text, f, b, new RectangleF(0, 15 * k, cr.Width, 70 * k), sf);
-
-            var today = JuleClock.Today;
-            int upTo = CalendarContent.OpenableUpTo(today);
-            for (int d = 1; d <= 24; d++) DrawDoor(g, d, upTo);
-
-            var mr = new RectangleF(40 * k, 605 * k, cr.Width - 80 * k, 95 * k);
-            using (var p = Rounded(mr, 12 * k))
-            using (var b = new SolidBrush(Color.FromArgb(45, 255, 255, 255)))
-                g.FillPath(b, p);
-            using (var f = new Font("Segoe UI", 12))
-            using (var b = new SolidBrush(Color.White))
-            using (var sf = new StringFormat { LineAlignment = StringAlignment.Center })
-                g.DrawString(message, f, b, RectangleF.Inflate(mr, -18 * k, -8 * k), sf);
+                g.DrawString(Text, titleFont, b, new RectangleF(0, 15 * k, cr.Width, 70 * k), sf);
         }
 
         void DrawDoor(Graphics g, int d, int upTo)
@@ -227,9 +279,8 @@ namespace JuleHygge
                     g.FillPath(b, p);
                 var inner = RectangleF.Inflate(rc, -rc.Width * 0.2f, -rc.Height * 0.2f);
                 DrawIcon(g, d, inner);
-                using (var f = new Font("Georgia", 9, FontStyle.Bold))
                 using (var b = new SolidBrush(Color.FromArgb(200, 180, 140)))
-                    g.DrawString(d.ToString(), f, b, rc.X + 6 * k, rc.Y + 4 * k);
+                    g.DrawString(d.ToString(), cornerFont, b, rc.X + 6 * k, rc.Y + 4 * k);
 
                 float a = openAnim[d];
                 if (a < 1)
@@ -257,10 +308,9 @@ namespace JuleHygge
                 using (var inner = Rounded(RectangleF.Inflate(rc, -7 * k, -7 * k), rad * 0.6f))
                 using (var pen = new Pen(Color.FromArgb(70, 0, 0, 0), 1f * k) { DashStyle = DashStyle.Dash })
                     g.DrawPath(pen, inner);
-                using (var f = new Font("Georgia", 26, FontStyle.Bold))
                 using (var b = new SolidBrush(numCol))
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(d.ToString(), f, b, rc, sf);
+                    g.DrawString(d.ToString(), numberFont, b, rc, sf);
 
                 if (d <= upTo)
                 {

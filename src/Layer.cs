@@ -290,7 +290,7 @@ namespace JuleHygge
             var fs = c.FullscreenRect;
             if (!fs.IsEmpty && fs.Contains(ScreenBounds))
             {
-                if (!paused) { ClearAll(); Present(); paused = true; prevDirty.Clear(); }
+                if (!paused) { ClearAll(); Present(); paused = true; prevDirty.Clear(); lightsShown = false; }
                 return;
             }
             if (paused) { paused = false; fullPresent = true; }
@@ -994,7 +994,10 @@ namespace JuleHygge
 
             foreach (var n in nisser)
             {
+                // Wrap at 200π (a whole number of periods for both the wave and the hat sway) so the
+                // float never grows large enough to lose precision during long uptimes.
                 n.T += dt;
+                if (n.T > 200 * (float)Math.PI) n.T -= 200 * (float)Math.PI;
                 n.StateTimer -= dt;
                 if (n.State == 0)
                 {

@@ -22,7 +22,10 @@ namespace JuleHygge
 
         public readonly Settings Cfg = Settings.Load();
         public readonly Random Rnd = new Random();
-        public float Time, Wind, StormUntil = -1;
+        // Seconds since start. A double, because a float loses precision after a few days of uptime
+        // and animations would start to stutter.
+        public double Time, StormUntil = -1;
+        public float Wind;
         public Rectangle FullscreenRect = Rectangle.Empty;
         public Icon AppIcon;
 
@@ -43,7 +46,8 @@ namespace JuleHygge
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly Control invoker;
         double lastT;
-        float windTarget, windTimer, santaNext = 5f, sparkAcc, fsTimer, topTimer, dayTimer, celebrateAt = -1;
+        float windTarget, windTimer, santaNext = 5f, sparkAcc, fsTimer, topTimer, dayTimer;
+        double celebrateAt = -1;
         DateTime lastDay;
         NotifyIcon tray;
         ToolStripMenuItem countdownItem, snowmanItem;
@@ -110,7 +114,14 @@ namespace JuleHygge
         }
 
         // ------------------------------------------------------------------ hovedløkke
+        // Any error skips just this frame and is logged; the overlay must never show crash dialogs.
         void Tick(object sender, EventArgs e)
+        {
+            try { TickCore(); }
+            catch (Exception ex) { ErrorLog.Write(ex); }
+        }
+
+        void TickCore()
         {
             double now = clock.Elapsed.TotalSeconds;
             float dt = (float)Math.Min(0.1, now - lastT);
@@ -149,9 +160,14 @@ namespace JuleHygge
             UpdateSanta(dt);
             UpdateSparks(dt);
             if (celebrateAt > 0 && Time >= celebrateAt) { celebrateAt = -1; SnowmanCelebrate(); }
-            if (plowAt > 0 && Time >= plowAt) { plowAt = -1; SendPlow(); }
+            if (plowAt >= 0 && Time >= plowAt) { plowAt = -1; SendPlow(); }
 
-            foreach (var l in layers) l.Frame(dt);
+            // Per screen, so a failing screen (e.g. mid display change) does not stop the others.
+            foreach (var l in layers)
+            {
+                try { l.Frame(dt); }
+                catch (Exception ex) { ErrorLog.Write(ex); }
+            }
         }
 
         void UpdateWind(float dt)
@@ -271,9 +287,9 @@ namespace JuleHygge
         // Schedules a plow run a number of seconds from now (used by the --sneplov=N test flag).
         public void SendPlowAfter(float seconds)
         {
-            plowAt = Time + seconds;
+            plowAt = Time + (seconds > 0 ? seconds : 0);   // also covers 0, negative and NaN
         }
-        float plowAt = -1;
+        double plowAt = -1;
 
         void NisseParty()
         {
@@ -466,7 +482,20 @@ namespace JuleHygge
             menu.Items.Add(Toggle("Julelys", () => Cfg.Lights, v => Cfg.Lights = v));
             menu.Items.Add(Toggle("Vis på alle skærme", () => Cfg.AllScreens, v => { Cfg.AllScreens = v; BuildLayers(); }));
             menu.Items.Add(Toggle("Pause ved fuldskærm (spil/film)", () => Cfg.PauseFullscreen, v => Cfg.PauseFullscreen = v));
-            menu.Items.Add(Toggle("Start med Windows", GetAutostart, SetAutostart));
+            // The checkmark always mirrors the registry (re-read when the menu opens), and a failed
+            // write (e.g. locked down by policy) just leaves the checkmark showing the real state.
+            var autostart = new ToolStripMenuItem("Start med Windows");
+            autostart.Checked = GetAutostart();
+            autostart.CheckOnClick = true;
+            autostart.CheckedChanged += (s, e) =>
+            {
+                if (syncingMenu) return;
+                SetAutostart(autostart.Checked);
+                syncingMenu = true;
+                autostart.Checked = GetAutostart();
+                syncingMenu = false;
+            };
+            menu.Items.Add(autostart);
             menu.Items.Add(new ToolStripSeparator());
 
             var exit = new ToolStripMenuItem("Afslut");
@@ -477,6 +506,9 @@ namespace JuleHygge
             {
                 countdownItem.Text = Countdown();
                 snowmanItem.Text = "Snemand (trin " + SnowmanStage + " af " + SnowmanMaxStage + ")";
+                syncingMenu = true;
+                autostart.Checked = GetAutostart();
+                syncingMenu = false;
             };
             tray.ContextMenuStrip = menu;
         }
@@ -514,20 +546,34 @@ namespace JuleHygge
             return "★ " + d + " dage til juleaften ★";
         }
 
+        bool syncingMenu;
+
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        static string AutostartCommand { get { return "\"" + Application.ExecutablePath + "\""; } }
+
+        // True only if the Run entry points at this exe; an entry for a moved or old copy counts as off.
         static bool GetAutostart()
         {
-            using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
-                return k != null && k.GetValue("JuleHygge") != null;
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
+                    return k != null && string.Equals(k.GetValue("JuleHygge") as string, AutostartCommand, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) { ErrorLog.Write(ex); return false; }
         }
+
         static void SetAutostart(bool on)
         {
-            using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
+            try
             {
-                if (k == null) return;
-                if (on) k.SetValue("JuleHygge", "\"" + Application.ExecutablePath + "\"");
-                else k.DeleteValue("JuleHygge", false);
+                using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                {
+                    if (k == null) return;
+                    if (on) k.SetValue("JuleHygge", AutostartCommand);
+                    else k.DeleteValue("JuleHygge", false);
+                }
             }
+            catch (Exception ex) { ErrorLog.Write(ex); }
         }
 
         static Icon MakeIcon()
