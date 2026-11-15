@@ -54,6 +54,18 @@ namespace JuleHygge
         public int EffectiveSnowLevel { get { return Time < StormUntil ? 2 : Cfg.SnowLevel; } }
         public bool SnowOn { get { return Cfg.Snow || Time < StormUntil; } }
 
+        // Power-save mode: snow only in a band above the taskbar, partial screen updates, lower frame rate.
+        public bool PowerSave { get; private set; }
+        float powerTimer;
+
+        void UpdatePowerSave()
+        {
+            bool onBattery = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline;
+            PowerSave = Cfg.PowerSave == 1 || (Cfg.PowerSave == 2 && onBattery);
+            int interval = PowerSave ? 50 : 33;
+            if (timer != null && timer.Interval != interval) timer.Interval = interval;
+        }
+
         public Controller()
         {
             invoker = new Control();
@@ -70,6 +82,7 @@ namespace JuleHygge
             timer = new Timer();
             timer.Interval = 33;
             timer.Tick += Tick;
+            UpdatePowerSave();
             lastT = clock.Elapsed.TotalSeconds;
             timer.Start();
         }
@@ -109,6 +122,13 @@ namespace JuleHygge
             {
                 dayTimer = 30;
                 if (JuleClock.Today != lastDay) UpdateDaily(false);
+            }
+
+            powerTimer -= dt;
+            if (powerTimer <= 0)
+            {
+                powerTimer = 5;
+                UpdatePowerSave();
             }
 
             fsTimer -= dt;
@@ -405,6 +425,24 @@ namespace JuleHygge
             menu.Items.Add(count);
             menu.Items.Add(new ToolStripSeparator());
 
+            var power = new ToolStripMenuItem("Strømspare");
+            string[] powerNames = { "Fra - fuld sne på hele skærmen", "Til - sne over proceslinjen, stille blæser", "Kun når den bærbare kører på batteri" };
+            int[] powerValues = { 1, 2, 0 };
+            foreach (int pv in powerValues)
+            {
+                int pvi = pv;
+                var it = new ToolStripMenuItem(powerNames[pv]);
+                it.Checked = Cfg.PowerSave == pvi;
+                it.Click += (s, e) =>
+                {
+                    Cfg.PowerSave = pvi;
+                    foreach (ToolStripMenuItem o in power.DropDownItems) o.Checked = o == it;
+                    Cfg.Save();
+                    UpdatePowerSave();
+                };
+                power.DropDownItems.Add(it);
+            }
+            menu.Items.Add(power);
             menu.Items.Add(Toggle("Julelys", () => Cfg.Lights, v => Cfg.Lights = v));
             menu.Items.Add(Toggle("Vis på alle skærme", () => Cfg.AllScreens, v => { Cfg.AllScreens = v; BuildLayers(); }));
             menu.Items.Add(Toggle("Pause ved fuldskærm (spil/film)", () => Cfg.PauseFullscreen, v => Cfg.PauseFullscreen = v));

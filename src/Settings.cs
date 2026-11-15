@@ -12,6 +12,7 @@ namespace JuleHygge
                     PauseFullscreen = true, Snowman = true, AllScreens = true;
         public int SnowLevel = 1;          // 0 = let, 1 = normal, 2 = snestorm
         public int NisseCount = 3;         // pr. skærm
+        public int PowerSave = 2;          // 0 = off, 1 = always on, 2 = only on battery
         public int SnowmanSeenStage = 0;
         public int CalendarYear = 0;
         public DateTime FirstRun = DateTime.MinValue, LastDoorNotice = DateTime.MinValue;
@@ -47,6 +48,7 @@ namespace JuleHygge
             s.AllScreens = B(d, "AllScreens", s.AllScreens);
             s.SnowLevel = Math.Max(0, Math.Min(2, I(d, "SnowLevel", s.SnowLevel)));
             s.NisseCount = Math.Max(1, Math.Min(12, I(d, "NisseCount", s.NisseCount)));
+            s.PowerSave = Math.Max(0, Math.Min(2, I(d, "PowerSave", s.PowerSave)));
             s.SnowmanSeenStage = I(d, "SnowmanSeenStage", 0);
             s.CalendarYear = I(d, "CalendarYear", 0);
             s.FirstRun = D(d, "FirstRun");
@@ -70,7 +72,7 @@ namespace JuleHygge
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
                     "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens),
-                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount,
+                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave,
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),
                     "OpenedDoors=" + string.Join(",", OpenedDoors.OrderBy(x => x)) });

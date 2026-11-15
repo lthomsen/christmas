@@ -37,6 +37,19 @@ namespace JuleHygge
         [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)] static extern IntPtr memset(IntPtr dest, int c, UIntPtr count);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct UPDATELAYEREDWINDOWINFO
+        {
+            public uint cbSize;
+            public IntPtr hdcDst, pptDst, psize, hdcSrc, pptSrc;
+            public uint crKey;
+            public IntPtr pblend;
+            public uint dwFlags;
+            public IntPtr prcDirty;
+        }
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool UpdateLayeredWindowIndirect(IntPtr hwnd, ref UPDATELAYEREDWINDOWINFO info);
         #endregion
 
         readonly Controller c;
@@ -63,6 +76,16 @@ namespace JuleHygge
 
         // områder der er tegnet på, så kun de skal ryddes næste frame
         List<Rectangle> dirty = new List<Rectangle>(), prevDirty = new List<Rectangle>();
+        // Areas that changed on screen without needing a clear next frame (e.g. the cached lights strip).
+        readonly List<Rectangle> presentOnly = new List<Rectangle>();
+        bool fullPresent = true, lastPowerSave, lightsShown;
+        // Unmanaged buffers for UpdateLayeredWindowIndirect (point, size, source point, blend, dirty rect).
+        IntPtr ulwDst, ulwSize, ulwSrc, ulwBlend, ulwDirty;
+
+        bool PS { get { return c.PowerSave; } }
+        // Top of the snow band used in power-save mode (snow falls only between here and the taskbar).
+        float BandTop { get { return Math.Max(0, groundY - H * 0.32f); } }
+        int LightsHeight { get { return (int)(70 * S); } }
 
         static readonly Color SantaRed = Color.FromArgb(205, 25, 35), Gold = Color.FromArgb(235, 195, 70),
             Skin = Color.FromArgb(255, 214, 186), Deer = Color.FromArgb(145, 95, 55), DeerDark = Color.FromArgb(100, 62, 32),
@@ -141,6 +164,15 @@ namespace JuleHygge
 
             heap = new float[W / HeapStep + 2];
             Bounds = ScreenBounds;
+
+            ulwDst = Marshal.AllocHGlobal(8); ulwSize = Marshal.AllocHGlobal(8); ulwSrc = Marshal.AllocHGlobal(8);
+            ulwBlend = Marshal.AllocHGlobal(4); ulwDirty = Marshal.AllocHGlobal(16);
+            Marshal.WriteInt32(ulwDst, 0, ScreenBounds.X); Marshal.WriteInt32(ulwDst, 4, ScreenBounds.Y);
+            Marshal.WriteInt32(ulwSize, 0, W); Marshal.WriteInt32(ulwSize, 4, H);
+            Marshal.WriteInt32(ulwSrc, 0, 0); Marshal.WriteInt32(ulwSrc, 4, 0);
+            // BLENDFUNCTION bytes: AC_SRC_OVER, 0, SourceConstantAlpha 255, AC_SRC_ALPHA
+            Marshal.WriteByte(ulwBlend, 0, 0); Marshal.WriteByte(ulwBlend, 1, 0);
+            Marshal.WriteByte(ulwBlend, 2, 255); Marshal.WriteByte(ulwBlend, 3, 1);
         }
 
         void FreeSurface()
@@ -154,6 +186,9 @@ namespace JuleHygge
                 DeleteDC(memDc);
                 memDc = IntPtr.Zero;
             }
+            foreach (var p in new[] { ulwDst, ulwSize, ulwSrc, ulwBlend, ulwDirty })
+                if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
+            ulwDst = ulwSize = ulwSrc = ulwBlend = ulwDirty = IntPtr.Zero;
         }
 
         void Present()
@@ -166,6 +201,63 @@ namespace JuleHygge
             var bf = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
             UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref bf, 2);
             ReleaseDC(IntPtr.Zero, screenDc);
+            fullPresent = false;
+        }
+
+        // Pushes only the changed parts of the surface to the screen. The changed rectangles are merged
+        // into at most three boxes (lights strip at the top, the sky, the band above the taskbar), each
+        // sent with UpdateLayeredWindowIndirect's dirty rect so DWM only uploads those pixels.
+        void PresentRegions(List<Rectangle> a, List<Rectangle> b, List<Rectangle> extra)
+        {
+            if (fullPresent) { Present(); return; }
+            int topLimit = LightsHeight + 4;
+            int bottomStart = (int)((PS ? BandTop : groundY - 150 * S) - 10);
+            var boxes = new Rectangle[3];
+            var has = new bool[3];
+            foreach (var list in new[] { a, b, extra })
+                foreach (var r0 in list)
+                {
+                    var r = Rectangle.Intersect(r0, new Rectangle(0, 0, W, H));
+                    if (r.Width <= 0 || r.Height <= 0) continue;
+                    int gi = r.Bottom <= topLimit ? 0 : (r.Top >= bottomStart ? 2 : 1);
+                    boxes[gi] = has[gi] ? Rectangle.Union(boxes[gi], r) : r;
+                    has[gi] = true;
+                }
+
+            long area = 0;
+            for (int i = 0; i < 3; i++) if (has[i]) area += (long)boxes[i].Width * boxes[i].Height;
+            if (area == 0) return;
+            if (area > (long)W * H / 2) { Present(); return; }   // mostly everything changed: one full update is cheaper
+
+            g.Flush(FlushIntention.Sync);
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            var info = new UPDATELAYEREDWINDOWINFO();
+            info.cbSize = (uint)Marshal.SizeOf(typeof(UPDATELAYEREDWINDOWINFO));
+            info.hdcDst = screenDc; info.pptDst = ulwDst; info.psize = ulwSize;
+            info.hdcSrc = memDc; info.pptSrc = ulwSrc; info.pblend = ulwBlend;
+            info.dwFlags = 2;  // ULW_ALPHA
+            info.prcDirty = ulwDirty;
+            bool ok = true;
+            for (int i = 0; i < 3 && ok; i++)
+            {
+                if (!has[i]) continue;
+                Marshal.WriteInt32(ulwDirty, 0, boxes[i].Left); Marshal.WriteInt32(ulwDirty, 4, boxes[i].Top);
+                Marshal.WriteInt32(ulwDirty, 8, boxes[i].Right); Marshal.WriteInt32(ulwDirty, 12, boxes[i].Bottom);
+                ok = UpdateLayeredWindowIndirect(Handle, ref info);
+            }
+            ReleaseDC(IntPtr.Zero, screenDc);
+            if (!ok) Present();   // fall back to a full update if partial updates are not supported
+        }
+
+        // Starts over with an empty surface (used when power-save mode is switched on or off).
+        void ResetSurface()
+        {
+            ClearAll();
+            prevDirty.Clear();
+            dirty.Clear();
+            flakes.Clear();
+            lightsShown = false;
+            fullPresent = true;
         }
 
         void ClearAll()
@@ -201,23 +293,32 @@ namespace JuleHygge
                 if (!paused) { ClearAll(); Present(); paused = true; prevDirty.Clear(); }
                 return;
             }
-            paused = false;
+            if (paused) { paused = false; fullPresent = true; }
+            if (PS != lastPowerSave) { lastPowerSave = PS; ResetSurface(); }
 
             UpdateSnow(dt);
             UpdateNisser(dt);
 
-            ClearRects(prevDirty);
-            prevDirty.Clear();
+            // Clear what was drawn last frame. If that touched the lights strip, the strip must be redrawn.
+            var cleared = prevDirty;
+            ClearRects(cleared);
+            var lightsRect = new Rectangle(0, 0, W, LightsHeight);
+            bool lightsDamaged = false;
+            foreach (var r in cleared) if (r.IntersectsWith(lightsRect)) { lightsDamaged = true; break; }
 
-            if (cfg.Lights) DrawLights(dt);
+            presentOnly.Clear();
+            if (cfg.Lights) DrawLights(dt, lightsDamaged);
+            else if (lightsShown) { Mark(0, 0, W, LightsHeight); lightsShown = false; }
             DrawSantaAndSparks();
             if (IsPrimary && cfg.Snowman) DrawSnowman(); else SnowmanPos = PointF.Empty;
             DrawGround();
             foreach (var n in nisser) DrawNisse(n);
             DrawSnow();
-            Present();
+            PresentRegions(cleared, dirty, presentOnly);
 
-            var tmp = prevDirty; prevDirty = dirty; dirty = tmp;
+            cleared.Clear();
+            prevDirty = dirty;
+            dirty = cleared;
         }
 
         // ------------------------------------------------------------------ sne
@@ -225,7 +326,9 @@ namespace JuleHygge
         {
             int[] baseCount = { 110, 260, 650 };
             float logicalArea = W * (float)H / (dpiScale * dpiScale);
-            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f))) : 0;
+            // In power-save mode snow only covers the band above the taskbar, at a slightly higher density.
+            float areaShare = PS ? (groundY - BandTop) / H * 1.3f : 1f;
+            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * areaShare) : 0;
             // nye fnug kommer ind fra toppen; overskydende fnug forsvinder først når de lander
             int add = flakes.Count == 0 ? target : Math.Max(1, target / 60);
             for (int i = 0; i < add && flakes.Count < target; i++) flakes.Add(NewFlake(flakes.Count == 0 || c.Time < 1f));
@@ -268,7 +371,8 @@ namespace JuleHygge
             f.R = (1f + depth * depth * 3.5f) * S;
             f.Vy = (25f + depth * 55f + Rnd() * 15f) * S * (c.EffectiveSnowLevel == 2 ? 1.5f : 1f);
             f.X = rnd.Next(-50, W + 50);
-            f.Y = anywhere ? Rnd() * groundY : -10 - Rnd() * 60;
+            float top = PS ? BandTop : 0;
+            f.Y = anywhere ? top + Rnd() * (groundY - top) : top - 10 - Rnd() * 60;
             f.Phase = Rnd() * 6.28f;
             f.Sway = (8 + Rnd() * 20) * S;
             f.SwaySpd = 0.5f + Rnd() * 1.2f;
@@ -334,16 +438,21 @@ namespace JuleHygge
         void DrawSnow()
         {
             g.Flush(FlushIntention.Sync);
+            // In power-save mode flakes fade in over the top of the snow band instead of popping into view.
+            float top = PS ? BandTop : -1000f, fadeLen = 90 * S;
             foreach (var f in flakes)
             {
-                if (f.Y < -f.R * 2) continue;
+                if (f.Y < -f.R * 2 || f.Y < top) continue;
                 Mark(f.X - f.R, f.Y - f.R, f.R * 2, f.R * 2);
-                if (!f.Crystal) BlendDot(f.X, f.Y, f.R, f.A);
+                int a = PS ? (int)(f.A * Math.Min(1f, (f.Y - top) / fadeLen)) : f.A;
+                if (!f.Crystal && a > 0) BlendDot(f.X, f.Y, f.R, a);
             }
             foreach (var f in flakes)
             {
-                if (!f.Crystal || f.Y < -f.R * 2) continue;
-                var pen = flakePens[Math.Max(0, Math.Min(15, (f.A - 60) / 13))];
+                if (!f.Crystal || f.Y < -f.R * 2 || f.Y < top) continue;
+                int alpha = PS ? (int)(f.A * Math.Min(1f, (f.Y - top) / fadeLen)) : f.A;
+                if (alpha < 60) continue;
+                var pen = flakePens[Math.Max(0, Math.Min(15, (alpha - 60) / 13))];
                 pen.Width = Math.Max(1f, 0.9f * S);
                 for (int k = 0; k < 3; k++)
                 {
@@ -784,9 +893,9 @@ namespace JuleHygge
             Color.FromArgb(255, 60, 60), Color.FromArgb(60, 220, 90), Color.FromArgb(255, 200, 60),
             Color.FromArgb(80, 150, 255), Color.FromArgb(255, 110, 200) };
 
-        void DrawLights(float dt)
+        void DrawLights(float dt, bool damaged)
         {
-            int lh = (int)(70 * S);
+            int lh = LightsHeight;
             if (lightsBmp == null || lightsBmp.Width != W || lightsBmp.Height != lh)
             {
                 if (lightsBmp != null) lightsBmp.Dispose();
@@ -794,20 +903,29 @@ namespace JuleHygge
                 lightsTimer = 0;
             }
             lightsTimer -= dt;
+            bool rerendered = false;
             if (lightsTimer <= 0)
             {
-                lightsTimer = 0.1f;
+                lightsTimer = PS ? 0.25f : 0.1f;   // the twinkle is slow, so 4 updates/s is enough in power-save mode
                 using (var lg = Graphics.FromImage(lightsBmp))
                 {
                     lg.SmoothingMode = SmoothingMode.AntiAlias;
                     lg.Clear(Color.Transparent);
                     RenderLights(lg);
                 }
+                rerendered = true;
             }
-            g.CompositingMode = CompositingMode.SourceCopy;
-            g.DrawImageUnscaled(lightsBmp, 0, 0);
-            g.CompositingMode = CompositingMode.SourceOver;
-            Mark(0, 0, W, lh);
+            // Normal mode redraws the strip every frame. Power-save mode leaves it in the buffer and only
+            // copies it again when it changed or something else cleared part of it.
+            if (!PS || rerendered || damaged || !lightsShown)
+            {
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.DrawImageUnscaled(lightsBmp, 0, 0);
+                g.CompositingMode = CompositingMode.SourceOver;
+                if (PS) presentOnly.Add(new Rectangle(0, 0, W, lh));
+            }
+            if (!PS) Mark(0, 0, W, lh);
+            lightsShown = true;
         }
 
         void RenderLights(Graphics lg)

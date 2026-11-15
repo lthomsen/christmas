@@ -91,4 +91,5 @@ Write-Ico $ico @(16, 24, 32, 48, 64, 256)
     /win32icon:$ico `
     /r:System.Windows.Forms.dll /r:System.Drawing.dll `
     (Join-Path $PSScriptRoot 'src\*.cs')
-if ($LASTEXITCODE -eq 0) { Write-Host "Built: $out" }
+if ($LASTEXITCODE -ne 0) { Write-Error "Build failed"; exit 1 }
+Write-Host "Built: $out"
