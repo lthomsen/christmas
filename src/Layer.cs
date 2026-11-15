@@ -297,6 +297,7 @@ namespace JuleHygge
             if (PS != lastPowerSave) { lastPowerSave = PS; ResetSurface(); }
 
             UpdateSnow(dt);
+            UpdatePlow(dt);
             UpdateNisser(dt);
 
             // Clear what was drawn last frame. If that touched the lights strip, the strip must be redrawn.
@@ -313,6 +314,7 @@ namespace JuleHygge
             if (IsPrimary && cfg.Snowman) DrawSnowman(); else SnowmanPos = PointF.Empty;
             DrawGround();
             foreach (var n in nisser) DrawNisse(n);
+            DrawPlow();
             DrawSnow();
             PresentRegions(cleared, dirty, presentOnly);
 
@@ -734,6 +736,229 @@ namespace JuleHygge
             var rc = new RectangleF(cx - r, cy - r, 2 * r, 2 * r);
             using (var b = new LinearGradientBrush(rc, Color.White, Color.FromArgb(200, 216, 238), 50f)) g.FillEllipse(b, rc);
             using (var p = new Pen(Color.FromArgb(70, 140, 165, 200), 1f)) g.DrawEllipse(p, rc);
+        }
+
+        // ------------------------------------------------------------------ snow plow
+        // An orange plow truck clears the taskbar when the snow gets high, alternating direction each run.
+        // Snow it scrapes up builds a growing pile in front of the blade and is thrown up as chunks.
+        class PlowBit { public float X, Y, VX, VY, Life, Max, Size; public bool Smoke; }
+        readonly List<PlowBit> plowBits = new List<PlowBit>();
+        bool plowActive;
+        float plowX, plowDir = 1, plowNextDir = 1, plowCooldown = 20f, plowPushed, plowWheel, plowSmokeTimer, plowChunkAcc;
+        const float PlowScale = 1.15f, PlowSpeed = 170f;
+
+        float PlowPileHeight { get { return Math.Min(34f, 4f + (float)Math.Sqrt(plowPushed / S) * 0.3f); } }
+
+        public void StartPlow()
+        {
+            if (plowActive) return;
+            float sc = S * PlowScale;
+            plowActive = true;
+            plowDir = plowNextDir;
+            plowNextDir = -plowNextDir;
+            plowX = plowDir > 0 ? -110 * sc : W + 110 * sc;
+            plowPushed = 0;
+            DebugLog("plow start dir=" + plowDir + " x=" + plowX + " W=" + W + " groundY=" + groundY + " PS=" + PS);
+        }
+
+        // Writes to %TEMP%\julehygge-debug.log when the JULE_DEBUG=1 environment variable is set.
+        static void DebugLog(string msg)
+        {
+            if (Environment.GetEnvironmentVariable("JULE_DEBUG") != "1") return;
+            try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "julehygge-debug.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + Environment.NewLine); }
+            catch { }
+        }
+
+        void UpdatePlow(float dt)
+        {
+            float sc = S * PlowScale;
+            if (!plowActive)
+            {
+                plowCooldown -= dt;
+                if (cfg.Plow && plowCooldown <= 0)
+                {
+                    float sum = 0;
+                    for (int i = 0; i < heap.Length; i++) sum += heap[i];
+                    if (sum / heap.Length > 18 * S * 0.75f) StartPlow();
+                }
+            }
+            else
+            {
+                plowX += plowDir * PlowSpeed * S * dt;
+                plowWheel += PlowSpeed * S * dt / (10 * sc);
+
+                // Everything between the starting edge and the blade stays scraped down to a thin layer.
+                float blade = plowX + plowDir * 72 * sc;
+                float residue = 1.5f * S;
+                float from = plowDir > 0 ? 0 : W;
+                int i0 = Math.Max(0, (int)(Math.Min(from, blade) / HeapStep));
+                int i1 = Math.Min(heap.Length - 1, (int)(Math.Max(from, blade) / HeapStep));
+                for (int i = i0; i <= i1; i++)
+                    if (heap[i] > residue) { plowPushed += heap[i] - residue; heap[i] = residue; }
+
+                float gy = groundY - HeapAt(plowX) + S;
+                float ph = PlowPileHeight;
+                if (ph > 10)
+                {
+                    plowChunkAcc += dt * 30;
+                    while (plowChunkAcc >= 1)
+                    {
+                        plowChunkAcc -= 1;
+                        var b = new PlowBit();
+                        b.X = plowX + plowDir * (70 + Rnd() * ph) * sc;
+                        b.Y = gy - ph * sc;
+                        b.VX = plowDir * (80 + Rnd() * 140) * S;
+                        b.VY = -(60 + Rnd() * 140) * S;
+                        b.Max = b.Life = 2f;
+                        b.Size = (1.5f + Rnd() * 2.5f) * S;
+                        plowBits.Add(b);
+                    }
+                }
+                plowSmokeTimer -= dt;
+                if (plowSmokeTimer <= 0)
+                {
+                    plowSmokeTimer = 0.2f;
+                    var b = new PlowBit();
+                    b.Smoke = true;
+                    b.X = plowX - plowDir * 2 * sc;
+                    b.Y = gy - 76 * sc;
+                    b.VX = -plowDir * 25 * S;
+                    b.VY = -30 * S;
+                    b.Max = b.Life = 1.6f;
+                    b.Size = 5 * S;
+                    plowBits.Add(b);
+                }
+
+                // Nisser wave at the truck as it passes.
+                foreach (var n in nisser)
+                    if (n.State != 2 && Math.Abs(n.X - plowX) < 140 * S) { n.State = 2; n.StateTimer = 1.5f; }
+
+                if ((int)(c.Time * 2) != (int)((c.Time - dt) * 2)) DebugLog("plow x=" + (int)plowX + " gy=" + (int)gy + " pushed=" + (int)plowPushed);
+                if ((plowDir > 0 && plowX > W + 260 * sc) || (plowDir < 0 && plowX < -260 * sc))
+                {
+                    plowActive = false;
+                    plowCooldown = 30f;
+                    DebugLog("plow done");
+                }
+            }
+
+            for (int i = plowBits.Count - 1; i >= 0; i--)
+            {
+                var b = plowBits[i];
+                b.Life -= dt;
+                b.X += b.VX * dt;
+                b.Y += b.VY * dt;
+                if (b.Smoke) b.Size += 6 * S * dt;
+                else b.VY += 420 * S * dt;
+                if (b.Life <= 0 || (!b.Smoke && b.VY > 0 && b.Y >= groundY - HeapAt(b.X))) plowBits.RemoveAt(i);
+            }
+        }
+
+        void DrawPlow()
+        {
+            foreach (var b in plowBits)
+            {
+                Mark(b.X - b.Size, b.Y - b.Size, b.Size * 2, b.Size * 2);
+                int a = b.Smoke ? (int)(90 * b.Life / b.Max) : 235;
+                using (var br = new SolidBrush(b.Smoke ? Color.FromArgb(a, 120, 120, 125) : Color.FromArgb(a, 250, 252, 255)))
+                    g.FillEllipse(br, b.X - b.Size, b.Y - b.Size, b.Size * 2, b.Size * 2);
+            }
+            if (!plowActive) return;
+
+            float sc = S * PlowScale;
+            float gy = groundY - HeapAt(plowX) + S;
+            float ph = PlowPileHeight;
+            Mark(plowX - 130 * sc, gy - 100 * sc, 260 * sc, 106 * sc);
+
+            var st = g.Save();
+            g.TranslateTransform(plowX, gy);
+            g.ScaleTransform(plowDir * sc, sc);
+
+            Color orange = Color.FromArgb(235, 130, 20), orangeDark = Color.FromArgb(185, 95, 10);
+            using (var o = new SolidBrush(orange))
+            using (var od = new SolidBrush(orangeDark))
+            using (var dark = new SolidBrush(Color.FromArgb(50, 50, 55)))
+            using (var grey = new SolidBrush(Color.FromArgb(110, 110, 115)))
+            using (var glass = new SolidBrush(Color.FromArgb(175, 210, 235)))
+            {
+                // exhaust stack
+                g.FillRectangle(grey, -4, -76, 4, 30);
+
+                // salt spreader at the back, with a spinning disc
+                g.FillRectangle(grey, -92, -32, 12, 16);
+                using (var p = new Pen(Color.FromArgb(70, 70, 75), 2f))
+                {
+                    float sa = plowWheel * 2;
+                    g.DrawLine(p, -86 - (float)Math.Cos(sa) * 6, -14, -86 + (float)Math.Cos(sa) * 6, -14);
+                }
+
+                // dump body with ribs and a reflective stripe
+                g.FillRectangle(o, -80, -50, 74, 36);
+                g.FillRectangle(od, -82, -53, 78, 5);
+                using (var rib = new Pen(orangeDark, 2f))
+                    foreach (float rx in new[] { -62f, -44f, -26f }) g.DrawLine(rib, rx, -48, rx, -16);
+
+                // cab
+                g.FillPolygon(o, new[] { new PointF(-2, -14), new PointF(-2, -64), new PointF(26, -64), new PointF(40, -44), new PointF(43, -14) });
+                g.FillPolygon(glass, new[] { new PointF(14, -59), new PointF(25, -59), new PointF(36, -43), new PointF(14, -43) });
+                g.FillRectangle(glass, 1, -59, 10, 16);
+                using (var door = new Pen(orangeDark, 1.2f)) g.DrawLine(door, 12, -60, 12, -16);
+                g.FillRectangle(dark, 4, -38, 5, 2);
+                using (var stripe = new SolidBrush(Color.FromArgb(230, 255, 255, 255))) g.FillRectangle(stripe, -80, -26, 123, 3);
+                using (var lamp = new SolidBrush(Color.FromArgb(255, 245, 190))) g.FillEllipse(lamp, 38, -26, 5, 5);
+
+                // amber beacon on the roof, flashing
+                g.FillRectangle(dark, 12, -68, 10, 4);
+                float flash = 0.5f + 0.5f * (float)Math.Sin(c.Time * 12);
+                using (var glow = new SolidBrush(Color.FromArgb((int)(150 * flash), 255, 170, 0)))
+                    g.FillEllipse(glow, 3, -82, 28, 24);
+                using (var beacon = new SolidBrush(Color.FromArgb(255, 200 + (int)(55 * flash), 120 + (int)(60 * flash), 0)))
+                    g.FillEllipse(beacon, 13, -74, 8, 7);
+
+                // chassis and wheels with rotating spokes
+                g.FillRectangle(dark, -86, -16, 132, 7);
+                using (var tyre = new SolidBrush(Color.FromArgb(30, 30, 32)))
+                using (var hub = new SolidBrush(Color.FromArgb(160, 160, 165)))
+                using (var spoke = new Pen(Color.FromArgb(60, 60, 65), 1.6f))
+                    foreach (float wx in new[] { -58f, -32f, 26f })
+                    {
+                        g.FillEllipse(tyre, wx - 10, -20, 20, 20);
+                        g.FillEllipse(hub, wx - 5, -15, 10, 10);
+                        for (int k = 0; k < 3; k++)
+                        {
+                            double a = plowWheel + k * Math.PI / 3;
+                            float dx = (float)Math.Cos(a) * 5, dy = (float)Math.Sin(a) * 5;
+                            g.DrawLine(spoke, wx - dx, -10 - dy, wx + dx, -10 + dy);
+                        }
+                    }
+
+                // snow pile in front of the blade
+                using (var pile = new GraphicsPath())
+                {
+                    pile.AddBezier(56, 1, 60, -ph, 74 + ph * 0.6f, -ph * 0.95f, 72 + ph * 1.6f, 1);
+                    pile.CloseFigure();
+                    using (var sb = new SolidBrush(Color.FromArgb(250, 250, 252, 255))) g.FillPath(sb, pile);
+                    using (var sp = new Pen(Color.FromArgb(120, 170, 200, 230), 1f)) g.DrawPath(sp, pile);
+                }
+
+                // plow arm and curved yellow blade with black warning stripes
+                using (var arm = new Pen(Color.FromArgb(80, 80, 85), 3f)) g.DrawLine(arm, 42, -12, 55, -16);
+                using (var bladePath = new GraphicsPath())
+                {
+                    bladePath.AddBezier(54, -38, 66, -30, 70, -14, 68, 2);
+                    bladePath.AddLine(68, 2, 56, 2);
+                    bladePath.AddBezier(56, 2, 58, -12, 54, -28, 50, -38);
+                    bladePath.CloseFigure();
+                    using (var yb = new SolidBrush(Color.FromArgb(250, 195, 30))) g.FillPath(yb, bladePath);
+                    var clip = g.Save();
+                    g.SetClip(bladePath, CombineMode.Intersect);
+                    using (var stripes = new Pen(Color.FromArgb(40, 40, 40), 3f))
+                        for (float sy = -44; sy < 8; sy += 9) g.DrawLine(stripes, 46, sy, 74, sy + 14);
+                    g.Restore(clip);
+                    using (var edge = new Pen(Color.FromArgb(130, 95, 10), 1.2f)) g.DrawPath(edge, bladePath);
+                }
+            }
+            g.Restore(st);
         }
 
         // ------------------------------------------------------------------ nisser

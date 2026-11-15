@@ -149,6 +149,7 @@ namespace JuleHygge
             UpdateSanta(dt);
             UpdateSparks(dt);
             if (celebrateAt > 0 && Time >= celebrateAt) { celebrateAt = -1; SnowmanCelebrate(); }
+            if (plowAt > 0 && Time >= plowAt) { plowAt = -1; SendPlow(); }
 
             foreach (var l in layers) l.Frame(dt);
         }
@@ -260,6 +261,19 @@ namespace JuleHygge
                 case 5: LaunchSanta(); StarShower(); NisseParty(); break;
             }
         }
+
+        // Sends the snow plow across every screen right away (from the tray menu or --sneplov).
+        public void SendPlow()
+        {
+            foreach (var l in layers) l.StartPlow();
+        }
+
+        // Schedules a plow run a number of seconds from now (used by the --sneplov=N test flag).
+        public void SendPlowAfter(float seconds)
+        {
+            plowAt = Time + seconds;
+        }
+        float plowAt = -1;
 
         void NisseParty()
         {
@@ -405,6 +419,12 @@ namespace JuleHygge
             var send = new ToolStripMenuItem("Send julemanden afsted nu!");
             send.Click += (s, e) => LaunchSanta();
             menu.Items.Add(send);
+            menu.Items.Add(new ToolStripSeparator());
+
+            menu.Items.Add(Toggle("Sneplov rydder proceslinjen", () => Cfg.Plow, v => Cfg.Plow = v));
+            var plow = new ToolStripMenuItem("Send sneploven ud nu!");
+            plow.Click += (s, e) => SendPlow();
+            menu.Items.Add(plow);
             menu.Items.Add(new ToolStripSeparator());
 
             menu.Items.Add(Toggle("Nisser", () => Cfg.Nisser, v => Cfg.Nisser = v));

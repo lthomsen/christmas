@@ -21,6 +21,17 @@ namespace JuleHygge
                 Application.SetCompatibleTextRenderingDefault(false);
                 var controller = new Controller();
                 if (Array.IndexOf(args, "--kalender") >= 0) controller.ShowCalendar();
+                // --sneplov sends the snow plow after 3 s; --sneplov=N after N seconds (handy for testing).
+                foreach (var a in args)
+                {
+                    if (a == "--sneplov") controller.SendPlowAfter(3);
+                    else if (a.StartsWith("--sneplov="))
+                    {
+                        float secs;
+                        if (float.TryParse(a.Substring(10), NumberStyles.Float, CultureInfo.InvariantCulture, out secs))
+                            controller.SendPlowAfter(secs);
+                    }
+                }
                 Application.Run(controller);
             }
         }

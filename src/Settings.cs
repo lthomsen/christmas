@@ -9,7 +9,7 @@ namespace JuleHygge
     class Settings
     {
         public bool Snow = true, SnowGround = true, Santa = true, Nisser = true, Lights = true,
-                    PauseFullscreen = true, Snowman = true, AllScreens = true;
+                    PauseFullscreen = true, Snowman = true, AllScreens = true, Plow = true;
         public int SnowLevel = 1;          // 0 = let, 1 = normal, 2 = snestorm
         public int NisseCount = 3;         // pr. skærm
         public int PowerSave = 2;          // 0 = off, 1 = always on, 2 = only on battery
@@ -46,6 +46,7 @@ namespace JuleHygge
             s.PauseFullscreen = B(d, "PauseFullscreen", s.PauseFullscreen);
             s.Snowman = B(d, "Snowman", s.Snowman);
             s.AllScreens = B(d, "AllScreens", s.AllScreens);
+            s.Plow = B(d, "Plow", s.Plow);
             s.SnowLevel = Math.Max(0, Math.Min(2, I(d, "SnowLevel", s.SnowLevel)));
             s.NisseCount = Math.Max(1, Math.Min(12, I(d, "NisseCount", s.NisseCount)));
             s.PowerSave = Math.Max(0, Math.Min(2, I(d, "PowerSave", s.PowerSave)));
@@ -71,7 +72,7 @@ namespace JuleHygge
                 File.WriteAllLines(FilePath, new[] {
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
-                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens),
+                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow),
                     "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave,
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),
