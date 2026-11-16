@@ -12,6 +12,9 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - `--kalender` åbner julekalenderen ved opstart.
 - Miljøvariablen `JULE_DATE=yyyy-MM-dd` får programmet til at tro, at det er en anden dato.
 - **Pas på:** En test med en falsk dato skriver åbnede låger og snemandens trin til den rigtige `%APPDATA%\JuleHygge\settings.ini`. Tag en backup af filen før testen, og sæt den tilbage bagefter.
+- Prefer `JULE_SETTINGS=<path>` for tests: it points the app at another settings file, so the real one is never touched.
+- Other Windows test aids (same as macOS): `--julemand`, `--effekt=N`, `--sneplov[=N]`, `--lyd-test=DIR` (writes the synthesized sounds as WAV + `summary.txt`), `JULE_DEBUG=1` (`%TEMP%\julehygge-debug.log`), `JULE_FPS=N`, `JULE_DEEPSNOW=1`, `JULE_NISSE_SECONDS=N`, `JULE_NO_SUPERVISOR=1`.
+- Normal starts run under a restart supervisor (a second `JuleHygge.exe` process). Test flags skip it. `Stop-Process -Name JuleHygge` stops both.
 - Der er ingen automatiske tests. Kontrollér visuelt med skærmbilleder. `CopyFromScreen` fanger overlay-vinduerne, og processen skal være DPI-aware, ellers bliver koordinaterne forkerte.
 
 ## Ydelse
@@ -55,4 +58,5 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Nissehuen (`Hat.swift`): placér den ud fra hovedets omrids i udskæringsmasken, ikke kun ud fra ansigtsrammen. Ansigtet sidder foran hovedets midte, så et gæt ud fra rammen rammer forkert, når hovedet drejes. Mål størrelsen ud fra rammens højde (bredden skrumper, når hovedet drejes). Ved test på et skærmbillede tæller en allerede tegnet hue med i masken.
 - `measure.sh` måler den nyeste JuleHygge-proces; den anden er vagtprocessen.
 - Test-appen skal køre som `.app` (`build/JuleHygge.app`, ikke `.build/release/JuleHygge`), ellers crasher UserNotifications. Brug `JULE_LOG` og `JULE_SETTINGS` med stier i projektet.
+- Sound is synthesized in code on both platforms (`macos/.../Sound.swift`, `src/Sound.cs`, played with `waveOut` on Windows) — still no sound files. Sound must always be off by default.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

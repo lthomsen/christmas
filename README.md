@@ -10,6 +10,14 @@ Et lille juleoverlay til Windows og macOS: snevejr, sne der lægger sig på proc
 - Animationen pauser automatisk, når et program kører i fuldskærm (spil, film).
 - Indstillingerne gemmes i `%APPDATA%\JuleHygge\settings.ini`.
 
+### Also on Windows (ported from the macOS version)
+- **Organic variation:** snowfall drifts slowly between ~60% and ~140% of the chosen amount, and every 1½–3 minutes a nisse walks in or out (at most ±2 from the chosen count).
+- **Across screens:** nisser walk over to a neighbouring screen about half the time, and the snow plow drives one continuous run across side-by-side screens.
+- **Frame rate menu** (12/20/30/60 fps for the calm scene); Santa gets 60 fps and the plow 30 fps only while they move. Power-save caps the calm scene at 12 fps.
+- **Stops completely** while the PC is locked, suspended or the display is off.
+- **Sound** (off by default, switched on separately in the menu): sleigh bells and the "Jingle Bells" chorus (Pierpont 1857, public domain) for Santa; engine, scraping and horn for the snow plow. Panned with the figure across the screens and synthesized in code (no sound files).
+- **Restarts itself after a crash:** a small supervisor process runs the app and restarts it after 5 s (it gives up after 3 quick crashes). Quitting from the menu closes both, so two `JuleHygge.exe` processes are expected.
+
 ## macOS
 Se [macos/README.md](macos/README.md) — native Swift-udgave i menulinjen med samme figurer og julekalender. Byg med `macos/build.sh`.
 
@@ -26,6 +34,23 @@ Al grafik tegnes i koden, så der ikke er billedfiler.
 
 **Test med en anden dato:** Sæt `$env:JULE_DATE = '2026-12-10'`, før du starter programmet. Så opfører kalenderen og snemanden sig, som om det er den dag. Bemærk at åbnede låger og snemandens trin bliver gemt i indstillingerne.
 
+**Test aids** (same names as on macOS):
+
+| Flag / environment variable | Effect |
+|---|---|
+| `--kalender` | opens the advent calendar at start |
+| `--julemand` | sends Santa right away |
+| `--sneplov` / `--sneplov=N` | sends the snow plow after 3 / N seconds |
+| `--effekt=N` | calendar effect: 1 Santa, 2 blizzard, 3 nisse party, 4 star shower, 5 everything |
+| `--lyd-test=DIR` | writes the synthesized sounds as WAV files (plus `summary.txt`) and quits |
+| `JULE_SETTINGS=path` | uses another settings file, so tests never change the real settings |
+| `JULE_DATE=yyyy-MM-dd` | pretends it is another date |
+| `JULE_DEBUG=1` | debug lines in `%TEMP%\julehygge-debug.log` |
+| `JULE_FPS=N` | fixed frame rate (for measurements) |
+| `JULE_DEEPSNOW=1` | starts with a full snow drift (for testing the snow plow) |
+| `JULE_NISSE_SECONDS=N` | nisser arrive/leave every N seconds |
+| `JULE_NO_SUPERVISOR=1` | runs without the restart supervisor (test flags also skip it) |
+
 ## Kode
 
 | Fil | Indhold |
@@ -35,7 +60,9 @@ Al grafik tegnes i koden, så der ikke er billedfiler.
 | `src/Layer.cs` | Ét gennemsigtigt overlay-vindue pr. skærm: sne, nisser, julelys, snemand |
 | `src/Calendar.cs` | Julekalender-vinduet og indholdet bag lågerne |
 | `src/Settings.cs` | Indlæsning og gemning af indstillinger |
+| `src/Sound.cs` | Sound synthesis (jingle, snow plow) and `waveOut` playback on its own thread |
+| `src/PowerWatcher.cs` | Detects when the display turns off or on |
 
 ## Ideer til næste version
 - Sne der lægger sig på toppen af åbne vinduer
-- Lyd (bjælder når julemanden flyver forbi), slås til i menuen
+- JuleHygge Kamera (Teams background) on Windows — needs a virtual camera driver and person segmentation, so it is a separate project
