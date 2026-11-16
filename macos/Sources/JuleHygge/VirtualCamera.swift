@@ -35,6 +35,10 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         r.outputPixelFormat = kCVPixelFormatType_OneComponent8
         return r
     }()
+    /// The virtual nisse hat (Hat.swift); only used on videoQueue.
+    private let hat = NisseHat()
+    private var lastFrameTime = CACurrentMediaTime()
+    private var statFace = 0.0
     private let lock = NSLock()
     private var background: CIImage?       // latest rendered Christmas scene (written on main, read on videoQueue)
     private(set) var active = false
@@ -147,8 +151,8 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             let now = CACurrentMediaTime()
             if now - statSince >= 2 {
                 let n = Double(max(1, statFrameN)), nb = Double(max(1, statBgN)), ns = Double(max(1, statSegN))
-                camLog.info("perf: \(String(format: "%.1f", Double(self.statFrameN) / (now - self.statSince)), privacy: .public) fps ud | billede \(String(format: "%.1f", self.statFrame / n * 1000), privacy: .public) ms (heraf udskæring \(String(format: "%.1f", self.statSeg / ns * 1000), privacy: .public) ms) | julescene \(String(format: "%.1f", self.statBg / nb * 1000), privacy: .public) ms × \(self.statBgN)")
-                statSince = now; statFrame = 0; statFrameN = 0; statSeg = 0; statSegN = 0; statBg = 0; statBgN = 0
+                camLog.info("perf: \(String(format: "%.1f", Double(self.statFrameN) / (now - self.statSince)), privacy: .public) fps ud | billede \(String(format: "%.1f", self.statFrame / n * 1000), privacy: .public) ms (heraf udskæring \(String(format: "%.1f", self.statSeg / ns * 1000), privacy: .public) ms, nissehue \(String(format: "%.1f", self.statFace / ns * 1000), privacy: .public) ms) | julescene \(String(format: "%.1f", self.statBg / nb * 1000), privacy: .public) ms × \(self.statBgN)")
+                statSince = now; statFrame = 0; statFrameN = 0; statSeg = 0; statSegN = 0; statFace = 0; statBg = 0; statBgN = 0
             }
         }
         guard let out = composite(camera: camera, background: bg), let sb = makeSampleBuffer(out) else { if frameCount % 60 == 1 { camLog.error("composite failed") }; return }
@@ -164,6 +168,17 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         try? handler.perform([segmentation])
         statSeg += CACurrentMediaTime() - ts; statSegN += 1
         guard let maskBuffer = segmentation.results?.first?.pixelBuffer else { return nil }
+        // the nisse hat: find the faces in the same camera frame
+        let wantsHat = c.cfg.cameraHat
+        let now = CACurrentMediaTime()
+        let dt = CGFloat(min(0.2, now - lastFrameTime)); lastFrameTime = now
+        var faces: [VNFaceObservation] = []
+        if wantsHat {
+            let tf = CACurrentMediaTime()
+            try? handler.perform([hat.request])
+            faces = hat.request.results ?? []
+            statFace += CACurrentMediaTime() - tf
+        }
 
         // The mask covers the whole camera image but at a lower resolution, often with another aspect ratio
         // (e.g. 4:3 vs 16:9). Stretch it to exactly the camera image first, then move both with the SAME
@@ -179,7 +194,14 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let bg = aspectFill(background, W, H)
         guard let blend = CIFilter(name: "CIBlendWithMask", parameters: [
             kCIInputImageKey: cam, kCIInputBackgroundImageKey: bg, kCIInputMaskImageKey: mask]),
-              let result = blend.outputImage else { return nil }
+              var result = blend.outputImage else { return nil }
+        if wantsHat {
+            let th = CACurrentMediaTime()
+            hat.update(faces, mask: maskBuffer, extent: camImage.extent, transform: fill, dt: dt)
+            hat.calibrate(camera: camera, faces: faces, queue: videoQueue)
+            result = hat.apply(to: result)
+            statFace += CACurrentMediaTime() - th   // detection + drawing the hat
+        }
 
         if pixelPool == nil {
             let attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,

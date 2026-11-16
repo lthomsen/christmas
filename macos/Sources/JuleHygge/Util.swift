@@ -52,14 +52,15 @@ enum JuleClock {
     }
 }
 
-/// Appends errors to ~/Library/Logs/JuleHygge.log, capped so a repeating error cannot grow it forever.
+/// Appends errors to ~/Library/Logs/JuleHygge.log (JULE_LOG overrides), capped so a repeating error cannot grow it forever.
 enum ErrorLog {
     nonisolated(unsafe) static var written = 0
 
     static func write(_ msg: String) {
         guard written < 200 else { return }
         written += 1
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/JuleHygge.log")
+        let url = ProcessInfo.processInfo.environment["JULE_LOG"].map { URL(fileURLWithPath: $0) }   // tests log inside the project
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/JuleHygge.log")
         let line = "\(JuleClock.format(Date())) \(msg)\n"
         if let h = try? FileHandle(forWritingTo: url) {
             h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
@@ -77,6 +78,8 @@ final class Flake {
     var x: F = 0, y: F = 0, r: F = 0, vy: F = 0, phase: F = 0, sway: F = 0, swaySpd: F = 0, rot: F = 0, rotSpd: F = 0
     var a = 0
     var crystal = false
+    /// Only some flakes land on window edges; the rest fall past them.
+    var catches = false
 }
 
 final class Spark {
@@ -91,6 +94,12 @@ final class Nisse {
     var variant = ""
     var entering = false, leaving = false, crossing = false
     var tunic = C(115, 120, 130), mitten = C(210, 30, 40), gift = C(40, 140, 70)
+    var tunicIndex = 0, giftIndex = 0
+    /// Meeting another nisse: both stop face to face, and halfway through the gift changes hands
+    /// (handed over, or swapped if both carry one). `meetWith` is set on one of the two only.
+    var meetTimer: F = 0, meetCooldown: F = 0
+    weak var meetWith: Nisse?
+    func refreshVariant() { variant = "\(tunicIndex)-\(carriesGift ? giftIndex : -1)" }
 }
 
 final class PlowBit {

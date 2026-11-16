@@ -1,7 +1,8 @@
 import AVFoundation
 
 /// Synthesized sound effects (the project has no sound files): Santa's sleigh bells with the
-/// "Jingle Bells" chorus (James Lord Pierpont, 1857, public domain), and the snow plow's engine, scraping
+/// "Jingle Bells" chorus (James Lord Pierpont, 1857), "Deck the Halls" (Welsh traditional) or "We Wish You a
+/// Merry Christmas" (English traditional), all public domain, and the snow plow's engine, scraping
 /// and horn. One audio engine is shared and only runs while something is audible, so it costs nothing
 /// the rest of the time.
 final class AudioHub {
@@ -10,16 +11,23 @@ final class AudioHub {
     private var running = false
     private var quietSince: CFTimeInterval = 0
 
-    func voice(_ make: @escaping () -> AVAudioPCMBuffer?, loops: Bool) -> Voice {
+    func voice(_ make: @escaping () -> AVAudioPCMBuffer?, loops: Bool, varispeed: Bool = false) -> Voice {
         let v = Voice(hub: self, make: make, loops: loops)
         engine.attach(v.player)
+        if varispeed { let vs = AVAudioUnitVarispeed(); engine.attach(vs); v.varispeed = vs }
         voices.append(v)
         return v
     }
 
     fileprivate func ensureRunning(for v: Voice) -> Bool {
         guard let buf = v.buffer else { return false }
-        if !v.connected { engine.connect(v.player, to: engine.mainMixerNode, format: buf.format); v.connected = true }
+        if !v.connected {
+            if let vs = v.varispeed {
+                engine.connect(v.player, to: vs, format: buf.format)
+                engine.connect(vs, to: engine.mainMixerNode, format: buf.format)
+            } else { engine.connect(v.player, to: engine.mainMixerNode, format: buf.format) }
+            v.connected = true
+        }
         if !running {
             do { try engine.start() } catch { ErrorLog.write("sound: \(error)"); return false }
             running = true
@@ -51,6 +59,12 @@ final class Voice {
     private let loops: Bool
     fileprivate var buffer: AVAudioPCMBuffer?
     fileprivate var connected = false
+    fileprivate var varispeed: AVAudioUnitVarispeed?
+    /// Playback speed (tempo and pitch together, like a tape), only for voices made with `varispeed: true`.
+    var rate: Float {
+        get { varispeed?.rate ?? 1 }
+        set { varispeed?.rate = max(0.5, min(2, newValue)) }
+    }
     private(set) var playing = false
     private var gain: Float = 0
 
@@ -178,34 +192,89 @@ enum Synth {
 
     // ------------------------------------------------------------------ synthesis
 
-    /// Renders one loop: the chorus played on a music-box/celesta-like tone over shaken sleigh bells.
-    static func jingle() -> AVAudioPCMBuffer? {
-        let sampleRate = Synth.sampleRate
-        let beat = 0.36                      // seconds per quarter note (~167 bpm)
-        // (MIDI note, length in beats); 0 = rest
-        let E5 = 76, F5 = 77, G5 = 79, C5 = 72, D5 = 74, A4 = 69, B4 = 71
-        let melody: [(Int, Double)] = [
-            (E5, 1), (E5, 1), (E5, 2),
-            (E5, 1), (E5, 1), (E5, 2),
-            (E5, 1), (G5, 1), (C5, 1.5), (D5, 0.5),
-            (E5, 4),
-            (F5, 1), (F5, 1), (F5, 1.5), (F5, 0.5),
-            (F5, 1), (E5, 1), (E5, 1), (E5, 0.5), (E5, 0.5),
-            (E5, 1), (D5, 1), (D5, 1), (E5, 1),
-            (D5, 2), (G5, 2),
-            (E5, 1), (E5, 1), (E5, 2),
-            (E5, 1), (E5, 1), (E5, 2),
-            (E5, 1), (G5, 1), (C5, 1.5), (D5, 0.5),
-            (E5, 4),
-            (F5, 1), (F5, 1), (F5, 1.5), (F5, 0.5),
-            (F5, 1), (E5, 1), (E5, 1), (E5, 0.5), (E5, 0.5),
-            (G5, 1), (G5, 1), (F5, 1), (D5, 1),
-            (C5, 3), (0, 1),
-        ]
-        // simple bass on the beat: root notes, an octave and a half lower
-        let bassPerBar: [Int] = [C5, C5, C5, C5, F5, C5, D5, G5, C5, C5, C5, C5, F5, C5, G5, C5].map { $0 - 24 }
-        _ = (A4, B4)
+    /// A tune for Santa's sleigh: melody as (MIDI note, beats; 0 = rest), one bass root per bar.
+    /// `bassOffset` is the pickup (beats before the first full bar); the loop is a whole number of bars.
+    struct Tune {
+        let name: String
+        let beat: Double            // seconds per beat
+        let beatsPerBar: Int
+        let bassOffset: Double
+        let melody: [(Int, Double)]
+        let bassRoots: [Int]
 
+        static let all = [jingleBells, deckTheHalls, weWishYou]
+
+        static let jingleBells: Tune = {
+            let E5 = 76, F5 = 77, G5 = 79, C5 = 72, D5 = 74
+            return Tune(name: "jingle-bells", beat: 0.36, beatsPerBar: 4, bassOffset: 0, melody: [
+                (E5, 1), (E5, 1), (E5, 2),
+                (E5, 1), (E5, 1), (E5, 2),
+                (E5, 1), (G5, 1), (C5, 1.5), (D5, 0.5),
+                (E5, 4),
+                (F5, 1), (F5, 1), (F5, 1.5), (F5, 0.5),
+                (F5, 1), (E5, 1), (E5, 1), (E5, 0.5), (E5, 0.5),
+                (E5, 1), (D5, 1), (D5, 1), (E5, 1),
+                (D5, 2), (G5, 2),
+                (E5, 1), (E5, 1), (E5, 2),
+                (E5, 1), (E5, 1), (E5, 2),
+                (E5, 1), (G5, 1), (C5, 1.5), (D5, 0.5),
+                (E5, 4),
+                (F5, 1), (F5, 1), (F5, 1.5), (F5, 0.5),
+                (F5, 1), (E5, 1), (E5, 1), (E5, 0.5), (E5, 0.5),
+                (G5, 1), (G5, 1), (F5, 1), (D5, 1),
+                (C5, 3), (0, 1),
+            ], bassRoots: [C5, C5, C5, C5, F5, C5, D5, G5, C5, C5, C5, C5, F5, C5, G5, C5].map { $0 - 24 })
+        }()
+
+        /// "Deck the Halls", whole verse with its "fa la la" lines, in C.
+        static let deckTheHalls: Tune = {
+            let B4 = 71, C5 = 72, D5 = 74, E5 = 76, F5 = 77, Fs5 = 78, G5 = 79, A5 = 81, B5 = 83, C6 = 84
+            let line1: [(Int, Double)] = [
+                (G5, 1.5), (F5, 0.5), (E5, 1), (D5, 1),
+                (C5, 1), (D5, 1), (E5, 1), (C5, 1),
+                (D5, 0.5), (E5, 0.5), (F5, 0.5), (D5, 0.5), (E5, 1.5), (D5, 0.5),
+                (C5, 1), (B4, 1), (C5, 2),
+            ]
+            let line3: [(Int, Double)] = [
+                (D5, 1.5), (E5, 0.5), (F5, 1), (D5, 1),
+                (E5, 1.5), (F5, 0.5), (G5, 1), (D5, 1),
+                (E5, 0.5), (Fs5, 0.5), (G5, 1), (A5, 0.5), (B5, 0.5), (C6, 1),
+                (B5, 1), (A5, 1), (G5, 2),
+            ]
+            let line4: [(Int, Double)] = [
+                (G5, 1.5), (F5, 0.5), (E5, 1), (D5, 1),
+                (C5, 1), (D5, 1), (E5, 1), (C5, 1),
+                (A5, 0.5), (A5, 0.5), (A5, 0.5), (A5, 0.5), (G5, 1.5), (F5, 0.5),
+                (E5, 1), (D5, 1), (C5, 2),
+            ]
+            let C = 48, F = 53, G = 55, D = 50
+            return Tune(name: "deck-the-halls", beat: 0.34, beatsPerBar: 4, bassOffset: 0,
+                        melody: line1 + line1 + line3 + line4,
+                        bassRoots: [C, C, G, C, C, C, G, C, G, C, D, G, C, C, F, C])
+        }()
+
+        /// "We Wish You a Merry Christmas" in 3/4, in C. The pickup note sits at the end of the loop.
+        static let weWishYou: Tune = {
+            let G4 = 67, A4 = 69, B4 = 71, C5 = 72, D5 = 74, E5 = 76, F5 = 77
+            let C = 48, F = 53, G = 55, D = 50, E = 52, A = 45
+            return Tune(name: "we-wish-you", beat: 0.4, beatsPerBar: 3, bassOffset: 0, melody: [
+                (C5, 1), (C5, 0.5), (D5, 0.5), (C5, 0.5), (B4, 0.5),
+                (A4, 1), (A4, 1), (A4, 1),
+                (D5, 1), (D5, 0.5), (E5, 0.5), (D5, 0.5), (C5, 0.5),
+                (B4, 1), (G4, 1), (G4, 1),
+                (E5, 1), (E5, 0.5), (F5, 0.5), (E5, 0.5), (D5, 0.5),
+                (C5, 1), (A4, 1), (G4, 0.5), (G4, 0.5),
+                (A4, 1), (D5, 1), (B4, 1),
+                (C5, 2), (G4, 1),          // "year" + the pickup "We" of the next round
+            ], bassRoots: [C, F, D, G, E, A, F, C])
+        }()
+    }
+
+    /// Renders one loop of `tune`: the melody on a music-box/celesta-like tone, a soft bass and shaken sleigh bells.
+    static func jingle(_ tune: Tune) -> AVAudioPCMBuffer? {
+        let sampleRate = Synth.sampleRate
+        let beat = tune.beat
+        let melody = tune.melody
         let totalBeats = melody.reduce(0) { $0 + $1.1 }
         let seconds = totalBeats * beat
         let n = Int(seconds * sampleRate)
@@ -271,12 +340,14 @@ enum Synth {
             if note > 0 { addBell(t, note, len * beat, 0.22) }
             t += len * beat
         }
-        // bass: one note per bar (4 beats), on beats 1 and 3
-        let bars = Int(totalBeats / 4)
+        // bass: the root on the first beat of each bar and the fifth on the third
+        let bpb = tune.beatsPerBar
+        let bars = Int((totalBeats - tune.bassOffset) / Double(bpb))
         for b in 0..<bars {
-            let root = bassPerBar[b % bassPerBar.count]
-            addBass(Double(b * 4) * beat, root, beat * 1.8)
-            addBass(Double(b * 4 + 2) * beat, root + 7, beat * 1.8)
+            let root = tune.bassRoots[b % tune.bassRoots.count]
+            let t0 = tune.bassOffset + Double(b * bpb)
+            addBass(t0 * beat, root, beat * 1.8)
+            addBass((t0 + 2) * beat, root + 7, beat * (Double(bpb) - 2 + 0.8))
         }
         // sleigh bells: a shake on every eighth note, accented on the beat, each shake a few bells
         var e = 0

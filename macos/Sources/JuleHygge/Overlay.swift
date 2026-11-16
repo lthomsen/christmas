@@ -159,7 +159,7 @@ final class ScreenOverlay {
     private var nisseLayers: [CALayer] = []
     /// Pre-rendered poses, shared by every nisse with the same clothes: key = variant + state + frame.
     private var nisseFrames: [String: CGImage] = [:]
-    private var paused = false, lastPowerSave = false
+    private var paused = false
     private var frameNo = 0
     private var groundTimer: F = 0
 
@@ -168,6 +168,9 @@ final class ScreenOverlay {
     private var sparkPool: DotPool!
     private let groundFill = CAShapeLayer(), groundLine = CAShapeLayer()
     private let nisseLayer = CALayer()
+    /// Snow piles on other apps' window edges: one fill + outline per window, rebuilt when the pile's version changes.
+    private let ledgeLayer = CALayer()
+    private var ledgeShapes: [Int: (fill: CAShapeLayer, line: CAShapeLayer, version: Int)] = [:]
     private var plowBitPool: DotPool!
     private var flakePool: DotPool!
     private var bulbLayers: [(layer: CALayer, omega: Double, phase: Double)] = []
@@ -176,8 +179,6 @@ final class ScreenOverlay {
     private var snowmanKey = ""
 
     private var PS: Bool { c.powerSave }
-    /// Top of the snow band used in power-save mode (snow falls only between here and the bottom).
-    private var bandTop: F { max(0, groundY - H * 0.32) }
     private var lightsHeight: F { 70 * S }
 
     static let santaRed = C(205, 25, 35), gold = C(235, 195, 70), skin = C(255, 214, 186),
@@ -261,6 +262,8 @@ final class ScreenOverlay {
         groundLine.fillColor = nil
         groundLine.strokeColor = C(170, 200, 230, 110)
         groundLine.lineWidth = 1.5 * S
+        ledgeLayer.frame = root.bounds
+        root.addSublayer(ledgeLayer)
         nisseLayer.frame = root.bounds
         root.addSublayer(nisseLayer)
         plowBitPool = DotPool(in: root, screenHeight: h)
@@ -343,7 +346,6 @@ final class ScreenOverlay {
             return
         }
         if paused { paused = false; root.isHidden = false }
-        if PS != lastPowerSave { lastPowerSave = PS; flakes.removeAll() }
         frameNo += 1
 
         updateSnow(dt)
@@ -356,6 +358,7 @@ final class ScreenOverlay {
         renderSnowman()
         groundTimer -= dt
         if groundTimer <= 0 { groundTimer = 0.2; renderGround() }   // the pile changes slowly
+        renderLedges()
         renderNisser()
         renderPlow()
         renderSnow()
@@ -365,8 +368,8 @@ final class ScreenOverlay {
     private func updateSnow(_ dt: F) {
         let baseCount = [110, 260, 650]
         let logicalArea = W * H
-        // In power-save mode snow only covers the band at the bottom, at a slightly higher density.
-        let areaShare: F = PS ? (groundY - bandTop) / H * 1.3 : 1
+        // Snow covers the whole screen also in power-save mode: a Mac handles it easily, power-save only lowers the frame rate.
+        let areaShare: F = 1
         let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity * (isVirtual ? 1.8 : 1)) : 0
         // new flakes come in from the top; surplus flakes disappear only when they land
         let add = flakes.isEmpty ? target : max(1, target / 60)
@@ -375,13 +378,29 @@ final class ScreenOverlay {
 
         let wind = c.wind * S
         let t = c.time
+        let ox = screenBounds.minX, oy = screenBounds.minY
+        let ledges = !isVirtual && cfg.windowSnow && c.snowOn ? c.ledgeList.filter { !$0.moving && !$0.visible.isEmpty } : []
         var k = flakes.count - 1
         while k >= 0 {
             let f = flakes[k]
+            let prevY = f.y
             f.y += f.vy * dt
             f.x += (wind * (0.4 + f.r / (4 * S)) + F(cos(t * Double(f.swaySpd) + Double(f.phase))) * f.sway) * dt
             f.rot += f.rotSpd * dt
             if f.x < -60 { f.x += W + 120 } else if f.x > W + 60 { f.x -= W + 120 }
+            // some flakes land on a window's top edge (or the snow already on it)
+            if f.catches && !ledges.isEmpty {
+                let gx = f.x + ox, gy = f.y + oy, py = prevY + oy
+                if let l = ledges.first(where: { l in
+                    let top = l.settled.minY - l.height(at: gx)
+                    return py < top && gy >= top && l.isVisible(gx)
+                }) {
+                    l.deposit(at: gx, r: f.r / S)
+                    if flakes.count > target { flakes.remove(at: k) } else { flakes[k] = newFlake(anywhere: false) }
+                    k -= 1
+                    continue
+                }
+            }
             if f.y >= groundY - heapAt(f.x) {
                 if cfg.snowGround { deposit(f.x, f.r) }
                 if flakes.count > target { flakes.remove(at: k) } else { flakes[k] = newFlake(anywhere: false) }
@@ -389,16 +408,42 @@ final class ScreenOverlay {
             k -= 1
         }
 
-        let maxH = 18 * S, slope = 1.2 * S
+        // Snowstorm: the wind carries snow along the pile, so it drifts up against the downwind screen edge,
+        // and flakes settle in long soft waves (`dune` in deposit). Drifts may grow taller and sink back slowly afterwards.
+        let storm = c.effectiveSnowLevel == 2 && c.snowOn && !isVirtual
+        let windNorm = max(-1.5, min(1.5, c.wind / 140))
+        if storm && abs(windNorm) > 0.15 && heap.count > 2 {
+            let rate = 0.02 * abs(windNorm) * dt, dir = windNorm > 0 ? 1 : -1
+            let moved = heap.map { $0 * rate }
+            for i in 0..<heap.count {
+                let j = i + dir
+                if j < 0 || j >= heap.count { continue }
+                heap[i] -= moved[i]; heap[j] += moved[i]
+            }
+        }
+        let maxH = (storm ? 30 : 18) * S, slope = 1.2 * S
         for i in 0..<(heap.count - 1) {
             let d = heap[i] - heap[i + 1]
             if d > slope { let m = (d - slope) * 0.3; heap[i] -= m; heap[i + 1] += m }
             else if d < -slope { let m = (-d - slope) * 0.3; heap[i] += m; heap[i + 1] -= m }
         }
+        // snow falling off a window that went away lands in the pile below
+        if !isVirtual {
+            for cl in c.clumps where !cl.dead {
+                let x = cl.x - ox, y = cl.y - oy
+                if x >= 0 && x < W && y >= 0 && y >= groundY - heapAt(x) {
+                    if cfg.snowGround { deposit(x, cl.r * S) }
+                    cl.dead = true
+                }
+            }
+        }
         let melt = !c.snowOn || !cfg.snowGround
         for i in 0..<heap.count {
             if melt { heap[i] = max(0, heap[i] - 3 * S * dt) }
-            if heap[i] > maxH { heap[i] = maxH }
+            // a full pile keeps soft bumps: the limit wavers along the screen (in global x, so screens line up)
+            let gx = Double(F(i) * heapStep + screenBounds.minX)
+            let lim = maxH * (0.78 + 0.22 * F(0.6 * sin(gx / 37) + 0.4 * sin(gx / 13.7)))
+            if heap[i] > lim { heap[i] = max(lim, heap[i] - 2 * S * dt) }
         }
     }
 
@@ -408,8 +453,7 @@ final class ScreenOverlay {
         f.r = (1 + depth * depth * 3.5) * S
         f.vy = (25 + depth * 55 + R() * 15) * S * (c.effectiveSnowLevel == 2 ? 1.5 : 1)
         f.x = -50 + R() * (W + 100)
-        let top = PS ? bandTop : 0
-        f.y = anywhere ? top + R() * (groundY - top) : top - 10 - R() * 60
+        f.y = anywhere ? R() * groundY : -10 - R() * 60
         f.phase = R() * 6.28
         f.sway = (8 + R() * 20) * S
         f.swaySpd = 0.5 + R() * 1.2
@@ -418,18 +462,16 @@ final class ScreenOverlay {
         if f.crystal { f.r *= 1.6 }
         f.rot = R() * 6.28
         f.rotSpd = (R() - 0.5) * 2
+        f.catches = R() < 0.5
         return f
     }
 
 
     private func renderSnow() {
         flakePool.begin()
-        // In power-save mode flakes fade in over the top of the snow band instead of popping into view.
-        let top: F = PS ? bandTop : -1000, fadeLen = 90 * S
         for f in flakes {
-            if f.y < -f.r * 2 || f.y < top { continue }
-            let a = PS ? F(f.a) * min(1, (f.y - top) / fadeLen) : F(f.a)
-            if a <= 0 { continue }
+            if f.y < -f.r * 2 { continue }
+            let a = F(f.a)
             if f.crystal {
                 if a < 60 { continue }
                 flakePool.add(images.crystal, x: f.x, y: f.y, w: f.r * 2, h: f.r * 2, opacity: a / 255, rotation: f.rot)
@@ -438,13 +480,27 @@ final class ScreenOverlay {
                 flakePool.add(images.flake, x: f.x, y: f.y, w: f.r * 2 + 0.5, h: f.r * 2 + 0.5, opacity: a / 255)
             }
         }
+        if !isVirtual {
+            let ox = screenBounds.minX, oy = screenBounds.minY
+            for cl in c.clumps where !cl.dead {
+                let x = cl.x - ox, y = cl.y - oy
+                if x < -10 || x > W + 10 || y < -10 || y > H + 10 { continue }
+                flakePool.add(images.flake, x: x, y: y, w: cl.r * 2 * S, h: cl.r * 2 * S, opacity: 0.95)
+            }
+        }
         flakePool.end()
     }
 
 
     private func deposit(_ x: F, _ r: F) {
         let idx = Int(x / heapStep)
-        let amount = 0.35 * r
+        var amount = 0.35 * r
+        if c.effectiveSnowLevel == 2 && !isVirtual {
+            // dunes: long waves in global x (so they line up across screens), slowly wandering with the wind
+            let gx = x + screenBounds.minX
+            let dune = 0.5 + 0.5 * sin(Double(gx / (240 * S)) * 2 * .pi - c.time * 0.03 * Double(c.wind > 0 ? 1 : -1))
+            amount *= 0.3 + 1.4 * F(dune)
+        }
         for k in -1...1 {
             let j = idx + k
             if j >= 0 && j < heap.count { heap[j] += k == 0 ? amount : amount * 0.5 }
@@ -458,6 +514,95 @@ final class ScreenOverlay {
         if i >= heap.count - 1 { return heap[heap.count - 1] }
         let t = fx - F(i)
         return heap[i] * (1 - t) + heap[i + 1] * t
+    }
+
+    /// Draws the snow on window edges that cross this screen; a path is only rebuilt when its pile changed.
+    private func renderLedges() {
+        if isVirtual { return }
+        let ox = screenBounds.minX, oy = screenBounds.minY
+        var seen = Set<Int>()
+        for l in c.ledgeList {
+            // a window dragged around (same size) takes its snow along, so the pile is hidden until it settles;
+            // a window that shrinks (minimize into the Dock) or is resized leaves the snow where it was until it is gone
+            let dragged = l.moving && l.rect.size == l.settled.size
+            let show = l.hasSnow && !dragged && cfg.windowSnow &&
+                l.settled.maxX > ox && l.settled.minX < ox + W && l.settled.minY > oy && l.settled.minY <= oy + H
+            if !show { continue }
+            seen.insert(l.id)
+            var e = ledgeShapes[l.id] ?? {
+                let fill = CAShapeLayer(), line = CAShapeLayer()
+                for sl in [fill, line] { sl.frame = ledgeLayer.bounds; sl.actions = ["path": NSNull(), "hidden": NSNull()]; ledgeLayer.addSublayer(sl) }
+                fill.fillColor = C(248, 252, 255, 245)
+                line.fillColor = nil
+                line.strokeColor = C(170, 200, 230, 110)
+                line.lineWidth = 1.2
+                return (fill, line, -1)
+            }()
+            if e.version == l.version { continue }
+            e.version = l.version
+            // shape layers are y-up: y' = H - y; the snow sits on the window's top edge
+            let base = H - (l.settled.minY - oy)
+            let fill = CGMutablePath(), line = CGMutablePath()
+            for (a, b) in l.visible {
+                let x0 = max(a, ox), x1 = min(b, ox + W)
+                if x1 - x0 < 4 { continue }
+                // only the stretches where snow has actually landed: a bare edge draws nothing (no thin white line).
+                // Each stretch: the pile's top from left to right, then back along the drape hanging below the edge.
+                var run: [(x: CGFloat, h: CGFloat, d: CGFloat)] = []
+                func flush() {
+                    if run.count >= 2 {
+                        let top = run.map { CGPoint(x: $0.x, y: base + $0.h) }
+                        fill.move(to: top[0])
+                        for i in 1..<top.count {
+                            let mid = CGPoint(x: (top[i - 1].x + top[i].x) / 2, y: (top[i - 1].y + top[i].y) / 2)
+                            fill.addQuadCurve(to: mid, control: top[i - 1])
+                        }
+                        // the drape's lower edge, rounded through the midpoints so the lobes look soft
+                        let low = run.reversed().map { CGPoint(x: $0.x, y: base - 0.5 - $0.d) }
+                        // round over the end: from the pile's end down to the drape's end in a curve
+                        fill.addQuadCurve(to: low[0], control: CGPoint(x: low[0].x + Ledge.step * 0.8, y: base))
+                        for i in 1..<low.count {
+                            let mid = CGPoint(x: (low[i - 1].x + low[i].x) / 2, y: (low[i - 1].y + low[i].y) / 2)
+                            fill.addQuadCurve(to: mid, control: low[i - 1])
+                        }
+                        fill.addQuadCurve(to: top[0], control: CGPoint(x: low[low.count - 1].x - Ledge.step * 0.8, y: base))
+                        fill.closeSubpath()
+                        line.addLines(between: top)
+                        // a faint outline under the drape where it hangs down, for depth
+                        if run.contains(where: { $0.d > 1 }) {
+                            line.move(to: low[0])
+                            for i in 1..<low.count {
+                                let mid = CGPoint(x: (low[i - 1].x + low[i].x) / 2, y: (low[i - 1].y + low[i].y) / 2)
+                                line.addQuadCurve(to: mid, control: low[i - 1])
+                            }
+                        }
+                    }
+                    run.removeAll()
+                }
+                var x = x0
+                while x <= x1 {
+                    let h = l.height(at: x), d = l.hang(at: x)
+                    if h > 0.6 || d > 0.6 {
+                        // start and end each stretch on the edge itself, so the pile tapers off
+                        if run.isEmpty { run.append((max(x0, x - Ledge.step) - ox, 0, 0)) }
+                        run.append((x - ox, h, d))
+                    } else if !run.isEmpty {
+                        run.append((x - ox, 0, 0))
+                        flush()
+                    }
+                    x += Ledge.step
+                }
+                if !run.isEmpty { run.append((min(x1, x) - ox, 0, 0)); flush() }
+            }
+            e.fill.path = fill
+            e.line.path = line
+            e.fill.isHidden = false; e.line.isHidden = false
+            ledgeShapes[l.id] = e
+        }
+        for (id, e) in ledgeShapes where !seen.contains(id) {
+            if c.ledges[id] == nil { e.fill.removeFromSuperlayer(); e.line.removeFromSuperlayer(); ledgeShapes[id] = nil }
+            else if !e.fill.isHidden { e.fill.isHidden = true; e.line.isHidden = true; ledgeShapes[id]?.version = -1 }
+        }
     }
 
     private var groundShown = false
@@ -878,7 +1023,24 @@ final class ScreenOverlay {
             }
         }
 
+        meetNisser()
         for n in nisser {
+            n.meetCooldown = max(0, n.meetCooldown - dt)
+            if n.meetTimer > 0 {
+                let before = n.meetTimer
+                n.meetTimer -= dt
+                // halfway through the meeting the gift changes hands
+                if before > Self.meetTime / 2 && n.meetTimer <= Self.meetTime / 2, let o = n.meetWith { exchangeGifts(n, o) }
+                if n.meetTimer <= 0 {
+                    // say goodbye and walk on, each in its own direction (past each other)
+                    n.meetWith = nil
+                    n.state = 0
+                    n.stateTimer = 4 + R() * 6
+                    n.meetCooldown = 20
+                }
+                n.t += dt
+                continue
+            }
             // Wrap at 200π (a whole number of periods for both the wave and the hat sway).
             n.t += dt
             if n.t > 200 * .pi { n.t -= 200 * .pi }
@@ -914,6 +1076,38 @@ final class ScreenOverlay {
         }
     }
 
+    static let meetTime: F = 2.4
+
+    /// Two nisser walking toward each other stop when they meet, if at least one of them carries a gift.
+    private func meetNisser() {
+        func free(_ n: Nisse) -> Bool {
+            n.state == 0 && n.meetTimer <= 0 && n.meetCooldown <= 0 && !n.entering && !n.leaving && !n.crossing
+        }
+        for a in nisser where free(a) {
+            for b in nisser where b !== a && free(b) && a.dir != b.dir && (a.carriesGift || b.carriesGift) {
+                let d = b.x - a.x
+                // b is in front of a, close enough to reach out
+                guard d * a.dir > 0, abs(d) < 24 * S * (a.size + b.size) / 2 else { continue }
+                for n in [a, b] { n.meetTimer = Self.meetTime; n.state = 1; n.meetWith = nil }
+                a.meetWith = b
+                return   // one meeting at a time is plenty
+            }
+        }
+    }
+
+    /// One gift: it goes to the other nisse. Two gifts: they swap.
+    private func exchangeGifts(_ a: Nisse, _ b: Nisse) {
+        if a.carriesGift && b.carriesGift {
+            swap(&a.gift, &b.gift); swap(&a.giftIndex, &b.giftIndex)
+        } else {
+            let (giver, taker) = a.carriesGift ? (a, b) : (b, a)
+            taker.carriesGift = true; taker.gift = giver.gift; taker.giftIndex = giver.giftIndex
+            giver.carriesGift = false
+        }
+        a.refreshVariant(); b.refreshVariant()
+        if ProcessInfo.processInfo.environment["JULE_DEBUG"] == "1" { ErrorLog.debug("nisser mødtes: gave \(a.carriesGift && b.carriesGift ? "byttet" : "overrakt")") }
+    }
+
     private func addNisse(walkingIn: Bool) {
         let n = Nisse()
         n.dir = R() < 0.5 ? -1 : 1
@@ -931,7 +1125,9 @@ final class ScreenOverlay {
         n.carriesGift = R() < 0.4
         let gi = Int.random(in: 0..<Self.gifts.count)
         n.gift = Self.gifts[gi]
-        n.variant = "\(ti)-\(n.carriesGift ? gi : -1)"
+        n.tunicIndex = ti
+        n.giftIndex = gi
+        n.refreshVariant()
         n.stateTimer = 4 + R() * 6
         n.t = R() * 10
         appendNisse(n)
