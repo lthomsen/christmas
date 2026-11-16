@@ -10,17 +10,26 @@ namespace JuleHygge
     {
         public bool Snow = true, SnowGround = true, Santa = true, Nisser = true, Lights = true,
                     PauseFullscreen = true, Snowman = true, AllScreens = true, Plow = true;
+        public bool Sound = false, PlowSound = false;   // sound is always off by default
         public int SnowLevel = 1;          // 0 = let, 1 = normal, 2 = snestorm
         public int NisseCount = 3;         // pr. skærm
         public int PowerSave = 2;          // 0 = off, 1 = always on, 2 = only on battery
+        public int SoundLevel = 1;         // 0 = low, 1 = medium, 2 = high
+        public int FrameRate = 20;         // frames/s while the scene is calm: 12, 20, 30 or 60 (same default as macOS)
         public int SnowmanSeenStage = 0;
         public int CalendarYear = 0;
         public DateTime FirstRun = DateTime.MinValue, LastDoorNotice = DateTime.MinValue;
         public HashSet<int> OpenedDoors = new HashSet<int>();
 
+        // JULE_SETTINGS=<path> uses another file, so tests never touch the real settings.
         static string FilePath
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JuleHygge", "settings.ini"); }
+            get
+            {
+                string over = Environment.GetEnvironmentVariable("JULE_SETTINGS");
+                if (!string.IsNullOrEmpty(over)) return Path.GetFullPath(over);
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JuleHygge", "settings.ini");
+            }
         }
 
         public static Settings Load()
@@ -58,6 +67,11 @@ namespace JuleHygge
             s.Snowman = B(d, "Snowman", s.Snowman);
             s.AllScreens = B(d, "AllScreens", s.AllScreens);
             s.Plow = B(d, "Plow", s.Plow);
+            s.Sound = B(d, "Sound", s.Sound);
+            s.PlowSound = B(d, "PlowSound", s.PlowSound);
+            s.SoundLevel = Math.Max(0, Math.Min(2, I(d, "SoundLevel", s.SoundLevel)));
+            s.FrameRate = I(d, "FrameRate", s.FrameRate);
+            if (Array.IndexOf(new[] { 12, 20, 30, 60 }, s.FrameRate) < 0) s.FrameRate = 20;
             s.SnowLevel = Math.Max(0, Math.Min(2, I(d, "SnowLevel", s.SnowLevel)));
             s.NisseCount = Math.Max(1, Math.Min(12, I(d, "NisseCount", s.NisseCount)));
             s.PowerSave = Math.Max(0, Math.Min(2, I(d, "PowerSave", s.PowerSave)));
@@ -88,8 +102,8 @@ namespace JuleHygge
                 File.WriteAllLines(tmp, new[] {
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
-                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow),
-                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave,
+                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow), "Sound=" + B(Sound), "PlowSound=" + B(PlowSound), "SoundLevel=" + SoundLevel,
+                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave, "FrameRate=" + FrameRate,
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),
                     "OpenedDoors=" + string.Join(",", OpenedDoors.OrderBy(x => x)) });

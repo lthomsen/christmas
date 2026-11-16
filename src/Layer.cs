@@ -56,7 +56,7 @@ namespace JuleHygge
         Settings cfg { get { return c.Cfg; } }
         readonly Random rnd;
         public readonly bool IsPrimary;
-        public Rectangle ScreenBounds;
+        public Rectangle ScreenBounds { get; private set; }
         public float S;
         public PointF SnowmanPos { get; private set; }
         int W, H;
@@ -166,6 +166,8 @@ namespace JuleHygge
             g.CompositingQuality = CompositingQuality.HighSpeed;
 
             heap = new float[W / HeapStep + 2];
+            // JULE_DEEPSNOW=1 starts with a full snow drift (for testing the snow plow).
+            if (Environment.GetEnvironmentVariable("JULE_DEEPSNOW") == "1") for (int i = 0; i < heap.Length; i++) heap[i] = 18 * S;
             Bounds = ScreenBounds;
 
             ulwDst = Marshal.AllocHGlobal(8); ulwSize = Marshal.AllocHGlobal(8); ulwSrc = Marshal.AllocHGlobal(8);
@@ -337,7 +339,8 @@ namespace JuleHygge
             float logicalArea = W * (float)H / (dpiScale * dpiScale);
             // In power-save mode snow only covers the band above the taskbar, at a slightly higher density.
             float areaShare = PS ? (groundY - BandTop) / H * 1.3f : 1f;
-            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * areaShare) : 0;
+            // SnowIntensity makes the amount drift slowly between ~60% and ~140% of the chosen level.
+            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * areaShare * c.SnowIntensity) : 0;
             // nye fnug kommer ind fra toppen; overskydende fnug forsvinder først når de lander
             int add = flakes.Count == 0 ? target : Math.Max(1, target / 60);
             for (int i = 0; i < add && flakes.Count < target; i++) flakes.Add(NewFlake(flakes.Count == 0 || c.Time < 1f));
@@ -750,59 +753,46 @@ namespace JuleHygge
         // Snow it scrapes up builds a growing pile in front of the blade and is thrown up as chunks.
         class PlowBit { public float X, Y, VX, VY, Life, Max, Size; public bool Smoke; }
         readonly List<PlowBit> plowBits = new List<PlowBit>();
-        bool plowActive;
-        float plowX, plowDir = 1, plowNextDir = 1, plowCooldown = 20f, plowPushed, plowWheel, plowSmokeTimer, plowChunkAcc;
-        const float PlowScale = 1.15f, PlowSpeed = 170f;
+        float plowSmokeTimer, plowChunkAcc;
+        const float PlowScale = Controller.PlowScale;
 
-        float PlowPileHeight { get { return Math.Min(34f, 4f + (float)Math.Sqrt(plowPushed / S) * 0.3f); } }
+        // The truck itself is driven by the Controller in global coordinates, so one plow drives continuously
+        // across neighbouring screens. These read its state in this screen's coordinates.
+        bool plowActive { get { return c.Plow.Active && c.Plow.Members.Contains(this); } }
+        float plowX { get { return c.Plow.GX - ScreenBounds.X; } }
+        float plowDir { get { return c.Plow.Dir; } }
+        float plowWheel { get { return c.Plow.Wheel; } }
+        bool PlowOnScreen { get { float m = 140 * S * PlowScale; return plowActive && plowX > -m && plowX < W + m; } }
+        float PlowPileHeight { get { return Math.Min(34f, 4f + (float)Math.Sqrt(c.Plow.Pushed / S) * 0.3f); } }
 
-        public void StartPlow()
+        // True while snow chunks or smoke from the plow are still flying on this screen (needs more frames).
+        public bool IsBusy { get { return plowBits.Count > 0; } }
+
+        // Average height of the snow pile (the Controller sends the plow when it gets high).
+        public float HeapAverage
         {
-            if (plowActive) return;
-            float sc = S * PlowScale;
-            plowActive = true;
-            plowDir = plowNextDir;
-            plowNextDir = -plowNextDir;
-            plowX = plowDir > 0 ? -110 * sc : W + 110 * sc;
-            plowPushed = 0;
-            DebugLog("plow start dir=" + plowDir + " x=" + plowX + " W=" + W + " groundY=" + groundY + " PS=" + PS);
-        }
-
-        // Writes to %TEMP%\julehygge-debug.log when the JULE_DEBUG=1 environment variable is set.
-        static void DebugLog(string msg)
-        {
-            if (Environment.GetEnvironmentVariable("JULE_DEBUG") != "1") return;
-            try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "julehygge-debug.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + Environment.NewLine); }
-            catch { }
+            get { float sum = 0; for (int i = 0; i < heap.Length; i++) sum += heap[i]; return sum / heap.Length; }
         }
 
         void UpdatePlow(float dt)
         {
             float sc = S * PlowScale;
-            if (!plowActive)
+            if (plowActive)
             {
-                plowCooldown -= dt;
-                if (cfg.Plow && plowCooldown <= 0)
-                {
-                    float sum = 0;
-                    for (int i = 0; i < heap.Length; i++) sum += heap[i];
-                    if (sum / heap.Length > 18 * S * 0.75f) StartPlow();
-                }
-            }
-            else
-            {
-                plowX += plowDir * PlowSpeed * S * dt;
-                plowWheel += PlowSpeed * S * dt / (10 * sc);
-
-                // Everything between the starting edge and the blade stays scraped down to a thin layer.
+                // Everything between the edge where the plow entered this screen and the blade stays scraped down.
                 float blade = plowX + plowDir * 72 * sc;
                 float residue = 1.5f * S;
                 float from = plowDir > 0 ? 0 : W;
-                int i0 = Math.Max(0, (int)(Math.Min(from, blade) / HeapStep));
-                int i1 = Math.Min(heap.Length - 1, (int)(Math.Max(from, blade) / HeapStep));
-                for (int i = i0; i <= i1; i++)
-                    if (heap[i] > residue) { plowPushed += heap[i] - residue; heap[i] = residue; }
-
+                if ((plowDir > 0 && blade > 0) || (plowDir < 0 && blade < W))
+                {
+                    int i0 = Math.Max(0, (int)(Math.Max(0, Math.Min(from, blade)) / HeapStep));
+                    int i1 = Math.Min(heap.Length - 1, (int)(Math.Min(W, Math.Max(from, blade)) / HeapStep));
+                    for (int i = i0; i <= i1; i++)
+                        if (heap[i] > residue) { c.Plow.Pushed += heap[i] - residue; heap[i] = residue; }
+                }
+            }
+            if (PlowOnScreen)
+            {
                 float gy = groundY - HeapAt(plowX) + S;
                 float ph = PlowPileHeight;
                 if (ph > 10)
@@ -840,13 +830,8 @@ namespace JuleHygge
                 foreach (var n in nisser)
                     if (n.State != 2 && Math.Abs(n.X - plowX) < 140 * S) { n.State = 2; n.StateTimer = 1.5f; }
 
-                if ((int)(c.Time * 2) != (int)((c.Time - dt) * 2)) DebugLog("plow x=" + (int)plowX + " gy=" + (int)gy + " pushed=" + (int)plowPushed);
-                if ((plowDir > 0 && plowX > W + 260 * sc) || (plowDir < 0 && plowX < -260 * sc))
-                {
-                    plowActive = false;
-                    plowCooldown = 30f;
-                    DebugLog("plow done");
-                }
+                if ((int)(c.Time * 2) != (int)((c.Time - dt) * 2))
+                    ErrorLog.Debug("plow on screen x=" + ScreenBounds.X + ": x=" + (int)plowX + " gy=" + (int)gy + " pushed=" + (int)c.Plow.Pushed);
             }
 
             for (int i = plowBits.Count - 1; i >= 0; i--)
@@ -870,7 +855,7 @@ namespace JuleHygge
                 using (var br = new SolidBrush(b.Smoke ? Color.FromArgb(a, 120, 120, 125) : Color.FromArgb(a, 250, 252, 255)))
                     g.FillEllipse(br, b.X - b.Size, b.Y - b.Size, b.Size * 2, b.Size * 2);
             }
-            if (!plowActive) return;
+            if (!PlowOnScreen) return;
 
             float sc = S * PlowScale;
             float gy = groundY - HeapAt(plowX) + S;
@@ -979,25 +964,54 @@ namespace JuleHygge
             foreach (var n in nisser) { n.State = 2; n.StateTimer = seconds; }
         }
 
+        // Number of nisser above/below the chosen count right now (drifts by at most ±2).
+        int nisseOffset;
+        float nisseChangeTimer = 90;
+
         void UpdateNisser(float dt)
         {
-            int target = cfg.Nisser ? cfg.NisseCount : 0;
-            while (nisser.Count < target)
+            // Every 1½–3 minutes a nisse arrives or leaves. The offset is pulled back toward 0, so the
+            // number swings a little up and down but stays around the chosen count over time.
+            nisseChangeTimer -= dt;
+            if (nisseChangeTimer <= 0)
             {
-                var n = new Nisse();
-                n.X = 60 * S + Rnd() * (W - 120 * S);
-                n.Dir = Rnd() < 0.5f ? -1 : 1;
-                n.Speed = (22 + Rnd() * 18) * S;
-                n.Size = 0.85f + Rnd() * 0.3f;
-                n.Tunic = Tunics[rnd.Next(Tunics.Length)];
-                n.Mitten = n.Tunic.R > 140 ? Color.FromArgb(40, 105, 65) : HatRed;
-                n.CarriesGift = Rnd() < 0.4f;
-                n.Gift = Gifts[rnd.Next(Gifts.Length)];
-                n.StateTimer = 3 + Rnd() * 6;
-                n.T = Rnd() * 10;
-                nisser.Add(n);
+                // JULE_NISSE_SECONDS=N changes the interval (for testing)
+                float over;
+                nisseChangeTimer = float.TryParse(Environment.GetEnvironmentVariable("JULE_NISSE_SECONDS"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out over) && over > 0 ? over : 90 + Rnd() * 90;
+                if (nisseOffset == 0) nisseOffset = Rnd() < 0.5f ? -1 : 1;
+                else if (Rnd() < 0.7f) nisseOffset += nisseOffset > 0 ? -1 : 1;
+                else nisseOffset = Math.Max(-2, Math.Min(2, nisseOffset + (nisseOffset > 0 ? 1 : -1)));
             }
-            if (nisser.Count > target) nisser.RemoveRange(target, nisser.Count - target);
+            int target = cfg.Nisser ? Math.Max(1, cfg.NisseCount + nisseOffset) : 0;
+            int staying = 0;
+            foreach (var n in nisser) if (!n.Leaving) staying++;
+            if (staying < target)
+            {
+                // At start-up everyone is already there; later arrivals walk in from a screen edge.
+                bool arriving = nisser.Count > 0 || c.Time > 2;
+                for (int i = 0; i < (arriving ? 1 : target - staying); i++) AddNisse(arriving);
+            }
+            else if (staying > target)
+            {
+                if (!cfg.Nisser) nisser.Clear();
+                else
+                {
+                    Nisse n = null;
+                    for (int i = nisser.Count - 1; i >= 0 && n == null; i--)
+                        if (!nisser[i].Leaving && !nisser[i].Entering && !nisser[i].Crossing) n = nisser[i];
+                    if (n != null)
+                    {
+                        // Walks off at an edge with no screen beyond it if there is one (so the count really goes
+                        // down), otherwise at the nearest edge, where it crosses to the neighbouring screen.
+                        n.Leaving = true;
+                        n.State = 0;
+                        bool leftFree = c.Neighbor(this, -1) == null, rightFree = c.Neighbor(this, 1) == null;
+                        if (leftFree != rightFree) n.Dir = leftFree ? -1 : 1;
+                        else n.Dir = n.X < W / 2 ? -1 : 1;
+                    }
+                }
+            }
 
             foreach (var n in nisser)
             {
@@ -1010,8 +1024,21 @@ namespace JuleHygge
                 {
                     n.X += n.Dir * n.Speed * dt;
                     n.WalkPhase += dt * n.Speed / (4.5f * S);
-                    if (n.X < 30 * S) { n.X = 30 * S; n.Dir = 1; }
-                    if (n.X > W - 30 * S) { n.X = W - 30 * S; n.Dir = -1; }
+                    if (n.Entering && n.X > 30 * S && n.X < W - 30 * S) n.Entering = false;
+                    if (!n.Entering && !n.Leaving && !n.Crossing)
+                    {
+                        // At an edge with a neighbouring screen, about half the nisser walk on over to it.
+                        if (n.X < 30 * S)
+                        {
+                            if (c.Neighbor(this, -1) != null && Rnd() < 0.5f) n.Crossing = true; else { n.X = 30 * S; n.Dir = 1; }
+                        }
+                        if (n.X > W - 30 * S)
+                        {
+                            if (c.Neighbor(this, 1) != null && Rnd() < 0.5f) n.Crossing = true; else { n.X = W - 30 * S; n.Dir = -1; }
+                        }
+                    }
+                    // no stopping or turning while arriving, leaving or crossing to another screen
+                    if (n.Entering || n.Leaving || n.Crossing) continue;
                     if (n.StateTimer <= 0)
                     {
                         float r = Rnd();
@@ -1020,6 +1047,7 @@ namespace JuleHygge
                         else { if (r < 0.7f) n.Dir = -n.Dir; n.StateTimer = 4 + Rnd() * 8; }
                     }
                 }
+                else if (n.Leaving) n.State = 0;   // stop waving and keep walking out
                 else if (n.StateTimer <= 0)
                 {
                     n.State = 0;
@@ -1027,6 +1055,52 @@ namespace JuleHygge
                     if (Rnd() < 0.4f) n.Dir = -n.Dir;
                 }
             }
+
+            // Nisser that have walked off the screen continue on the neighbouring screen in that direction,
+            // if there is one; otherwise they are gone.
+            for (int i = nisser.Count - 1; i >= 0; i--)
+            {
+                var n = nisser[i];
+                if (!(n.Leaving || n.Crossing) || (n.X >= -45 * S && n.X <= W + 45 * S)) continue;
+                nisser.RemoveAt(i);
+                var next = c.Neighbor(this, n.Dir);
+                if (next != null && cfg.Nisser) next.ReceiveNisse(n, S);
+            }
+        }
+
+        void AddNisse(bool walkingIn)
+        {
+            var n = new Nisse();
+            n.Dir = Rnd() < 0.5f ? -1 : 1;
+            if (walkingIn)
+            {
+                n.Entering = true;
+                n.X = n.Dir > 0 ? -40 * S : W + 40 * S;
+            }
+            else n.X = 60 * S + Rnd() * (W - 120 * S);
+            n.Speed = (22 + Rnd() * 18) * S;
+            n.Size = 0.85f + Rnd() * 0.3f;
+            n.Tunic = Tunics[rnd.Next(Tunics.Length)];
+            n.Mitten = n.Tunic.R > 140 ? Color.FromArgb(40, 105, 65) : HatRed;
+            n.CarriesGift = Rnd() < 0.4f;
+            n.Gift = Gifts[rnd.Next(Gifts.Length)];
+            n.StateTimer = 4 + Rnd() * 6;
+            n.T = Rnd() * 10;
+            nisser.Add(n);
+        }
+
+        // A nisse arriving from the neighbouring screen: it walks in at the matching edge, same clothes and direction.
+        public void ReceiveNisse(Nisse n, float fromScale)
+        {
+            n.Crossing = false;
+            n.Leaving = false;
+            n.Entering = true;
+            n.State = 0;
+            n.Speed = n.Speed / fromScale * S;
+            n.X = n.Dir > 0 ? -40 * S : W + 40 * S;
+            n.StateTimer = 4 + Rnd() * 6;
+            nisser.Add(n);
+            ErrorLog.Debug("nisse crossed to screen x=" + ScreenBounds.X + " dir=" + n.Dir + " (" + nisser.Count + " here now)");
         }
 
         void DrawNisse(Nisse n)

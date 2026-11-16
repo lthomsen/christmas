@@ -12,6 +12,9 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - `--kalender` åbner julekalenderen ved opstart.
 - Miljøvariablen `JULE_DATE=yyyy-MM-dd` får programmet til at tro, at det er en anden dato.
 - **Pas på:** En test med en falsk dato skriver åbnede låger og snemandens trin til den rigtige `%APPDATA%\JuleHygge\settings.ini`. Tag en backup af filen før testen, og sæt den tilbage bagefter.
+- Prefer `JULE_SETTINGS=<path>` for tests: it points the app at another settings file, so the real one is never touched.
+- Other Windows test aids (same as macOS): `--julemand`, `--effekt=N`, `--sneplov[=N]`, `--lyd-test=DIR` (writes the synthesized sounds as WAV + `summary.txt`), `JULE_DEBUG=1` (`%TEMP%\julehygge-debug.log`), `JULE_FPS=N`, `JULE_DEEPSNOW=1`, `JULE_NISSE_SECONDS=N`, `JULE_NO_SUPERVISOR=1`.
+- Normal starts run under a restart supervisor (a second `JuleHygge.exe` process). Test flags skip it. `Stop-Process -Name JuleHygge` stops both.
 - Der er ingen automatiske tests. Kontrollér visuelt med skærmbilleder. `CopyFromScreen` fanger overlay-vinduerne, og processen skal være DPI-aware, ellers bliver koordinaterne forkerte.
 
 ## Ydelse
@@ -49,5 +52,5 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
   - Brug ikke `CALayer.render(in:)` til kamerabaggrunden. Den laver en offscreen-buffer for hvert lag med gennemsigtighed (~900 ms for ~260 snefnug). `ScreenOverlay.renderSceneImage()` tegner lagtræet selv (~10 ms). `CARenderer` gav kun magenta på macOS 27.
   - Vision-masken er 512×384 (4:3), mens kameraet er 1920×1080 (16:9). Stræk masken til kamerabilledet, og flyt begge med samme transformation. Beregn masken for hvert billede, ellers halter kanten.
   - `timeout` findes ikke på macOS. Kør `log stream` i baggrunden og stop den med `kill`.
-- Lyd (kun macOS) syntetiseres i `Sound.swift` — stadig ingen lydfiler. Lyd skal altid være slået fra som standard.
+- Sound is synthesized in code on both platforms (`macos/.../Sound.swift`, `src/Sound.cs`, played with `waveOut` on Windows) — still no sound files. Sound must always be off by default.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.
