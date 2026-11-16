@@ -43,6 +43,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private var statusItem: NSStatusItem!
     private var calendarWindow: CalendarWindow?
     private var menuActions: [MenuAction] = []
+    private var santaCameraItem: NSMenuItem!, plowCameraItem: NSMenuItem!
     private var countdownItem: NSMenuItem!, snowmanItem: NSMenuItem!, autostartItem: NSMenuItem!
     private(set) var powerSave = false
 
@@ -93,7 +94,11 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         if let f = Double(ProcessInfo.processInfo.environment["JULE_FPS"] ?? "") { return f }
         let calm = Double(powerSave ? min(cfg.frameRate, 12) : cfg.frameRate)
         // the camera background is small and blended with the camera: 20 fps is plenty, also while Santa flies
-        if camera.active && cfg.cameraPausesScreens { return min(max(calm, 20), 20) }
+        if camera.active && cfg.cameraPausesScreens {
+            // 30 fps while Santa or the plow moves in the camera picture, otherwise 20
+            let moving = santaActive || plow.active || !sparks.isEmpty
+            return moving ? 30 : 20
+        }
         // Santa (and his sparks/star showers) moves fast and needs 60 fps to look fluent.
         if santaActive || !sparks.isEmpty { return max(calm, powerSave ? 30 : 60) }
         // The plow is slow (~175 pt/s), so 30 fps is smooth enough and costs about half as much.
@@ -160,8 +165,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         let v = ScreenOverlay(virtualFor: self, width: F(VirtualCamera.width), height: F(VirtualCamera.height))
         virtualScene = v
         overlays.append(v)
-        santaNext = 2
-        DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
+        santaNext = 1000
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.sendSantaToCamera(); self?.sendPlowToCamera() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             if let img = v.renderSceneImage() {
                 try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?
@@ -312,17 +318,21 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     // ------------------------------------------------------------------ julemanden
-    func launchSanta() {
+    /// Sends Santa over a random screen, or over `screen` only (e.g. the camera scene).
+    func launchSanta(on screen: ScreenOverlay? = nil) {
         if santaActive || overlays.isEmpty { return }
-        let target = overlays.randomElement()!
+        // ordinary trips go over the real screens; the camera scene only gets Santa when sent there
+        guard let target = screen ?? overlays.filter({ !$0.isVirtual }).randomElement() else { return }
         let b = target.screenBounds
         santaScale = target.S
         santaY0 = b.minY + b.height * (0.12 + R() * 0.25)
-        // fly over every screen at the same height
+        // fly over every real screen at the same height (the camera scene is a world of its own)
         santaMinX = b.minX; santaMaxX = b.maxX
-        for o in overlays {
-            let lb = o.screenBounds
-            if santaY0 >= lb.minY && santaY0 < lb.maxY { santaMinX = min(santaMinX, lb.minX); santaMaxX = max(santaMaxX, lb.maxX) }
+        if !target.isVirtual {
+            for o in overlays where !o.isVirtual {
+                let lb = o.screenBounds
+                if santaY0 >= lb.minY && santaY0 < lb.maxY { santaMinX = min(santaMinX, lb.minX); santaMaxX = max(santaMaxX, lb.maxX) }
+            }
         }
         santaDir = R() < 0.5 ? 1 : -1
         santaX = santaDir > 0 ? santaMinX - 420 * santaScale : santaMaxX + 420 * santaScale
@@ -333,7 +343,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
 
     private func updateSanta(_ dt: F) {
         if !santaActive {
-            if cfg.santa { santaNext -= dt; if santaNext <= 0 { launchSanta(); santaNext = 60 + R() * 120 } }
+            if cfg.santa {
+                santaNext -= dt
+                if santaNext <= 0 {
+                    // while the desktop is paused for the camera, Santa visits the meeting instead
+                    if screensPausedForCamera, let v = virtualScene { launchSanta(on: v) } else { launchSanta() }
+                    santaNext = 60 + R() * 120
+                }
+            }
             return
         }
         santaX += santaDir * santaSpeed * dt
@@ -430,8 +447,26 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private let plowSpeed: F = 170, plowScale: F = 1.15
 
     /// Sends the plow out now (menu, --sneplov), starting from the main screen's row of screens.
+    /// Sends Santa into the JuleHygge Kamera picture (only while the camera is in use).
+    func sendSantaToCamera() {
+        guard let v = virtualScene else { return }
+        if santaActive { santaActive = false; sparks.removeAll() }   // take him off the desktop and into the meeting
+        launchSanta(on: v)
+    }
+
+    /// Sends the snow plow across the JuleHygge Kamera picture (only while the camera is in use).
+    func sendPlowToCamera() {
+        guard let v = virtualScene else { return }
+        if plow.active { plow.active = false }
+        startPlow(from: v)
+    }
+
+    /// True while the desktop overlay is paused because JuleHygge Kamera is in use: then everything happens in the camera picture.
+    private var screensPausedForCamera: Bool { camera.active && cfg.cameraPausesScreens && virtualScene != nil }
+
     func sendPlow() {
-        if let o = overlays.first(where: { $0.isPrimary }) ?? overlays.first { startPlow(from: o) }
+        if screensPausedForCamera { sendPlowToCamera(); return }
+        if let o = overlays.first(where: { $0.isPrimary && !$0.isVirtual }) ?? overlays.first(where: { !$0.isVirtual }) { startPlow(from: o) }
     }
 
     private func startPlow(from start: ScreenOverlay) {
@@ -462,7 +497,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private func updatePlow(_ dt: F) {
         if !plow.active {
             plow.cooldown -= dt
-            if cfg.plow && plow.cooldown <= 0, let o = overlays.first(where: { $0.heapAverage > 18 * $0.S * 0.75 }) { startPlow(from: o) }
+            // while the screens are paused for the camera only the camera picture is plowed (the others are hidden)
+            if cfg.plow && plow.cooldown <= 0,
+               let o = overlays.first(where: { $0.isVirtual == screensPausedForCamera && $0.heapAverage > 18 * $0.S * 0.75 }) { startPlow(from: o) }
             return
         }
         // speed and size follow the screen the truck is on
@@ -604,7 +641,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(.separator())
 
         menu.addItem(toggle("Julemanden", { $0.santa }, { $0.santa = $1 }))
-        menu.addItem(item("Send julemanden afsted nu!") { [unowned self] _ in launchSanta() })
+        menu.addItem(item("Send julemanden afsted nu!") { [unowned self] _ in
+            if screensPausedForCamera { sendSantaToCamera() } else { launchSanta() }
+        })
         menu.addItem(toggle("Lyd: bjælder og jingle når julemanden flyver", { $0.sound }, { $0.sound = $1 }))
         menu.addItem(.separator())
 
@@ -624,6 +663,10 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(choice("Billedfrekvens",
                             ["12 billeder/s - mindst strøm", "20 billeder/s - normal", "30 billeder/s - glattere sne", "60 billeder/s - helt glat, mest strøm"],
                             [12, 20, 30, 60], { $0.frameRate }, { [unowned self] in $0.frameRate = $1; startTimer() }))
+        santaCameraItem = item("Send julemanden ind i kameraet") { [unowned self] _ in sendSantaToCamera() }
+        plowCameraItem = item("Send sneploven ind i kameraet") { [unowned self] _ in sendPlowToCamera() }
+        menu.addItem(santaCameraItem)
+        menu.addItem(plowCameraItem)
         menu.addItem(item("Installér JuleHygge Kamera (baggrund i Teams)…") { [unowned self] _ in cameraInstaller.install() })
         menu.addItem(toggle("Pause skærmene mens JuleHygge Kamera bruges", { $0.cameraPausesScreens }, { $0.cameraPausesScreens = $1 }))
         menu.addItem(item("Fjern JuleHygge Kamera") { [unowned self] _ in cameraInstaller.remove() })
@@ -642,6 +685,12 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // only meaningful while an app (Teams, Photo Booth…) uses JuleHygge Kamera
+        let inCamera = virtualScene != nil
+        santaCameraItem.isEnabled = inCamera
+        plowCameraItem.isEnabled = inCamera
+        santaCameraItem.toolTip = inCamera ? nil : "Virker når JuleHygge Kamera er i brug i Teams eller en anden app"
+        plowCameraItem.toolTip = santaCameraItem.toolTip
         countdownItem.title = Self.countdown()
         snowmanItem.title = "Snemand (trin \(snowmanStage) af \(Self.snowmanMaxStage))"
         autostartItem.state = Self.autostart ? .on : .off

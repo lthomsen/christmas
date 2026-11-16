@@ -41,7 +41,8 @@ Et virtuelt kamera, der viser dig foran en levende julescene: nattehimmel, sneve
 - Kræver Xcode-projektet (`JuleHygge.xcodeproj`, genereres af `tools/make-xcodeproj.py`) og signering med teamets Apple Development-certifikat. Byg og installér i `/Applications` med `./xcbuild.sh`, og vælg derefter **Installér JuleHygge Kamera** i menuen og godkend udvidelsen i Systemindstillinger.
 - Engangsforudsætning: Mac'en skal være registreret som enhed på teamet. Åbn projektet i Xcode > Signing & Capabilities > "Register Device", eller tilføj Mac'ens Provisioning UDID på developer.apple.com.
 - Ydelse mens kameraet bruges (målt): cirka 27 billeder/s ud, julescenen tegnes på cirka 10 ms (20 gange/s), udskæring på cirka 32 ms pr. billede, og appen bruger cirka 50 % CPU. Skærm-overlayet holder pause imens. Appen skriver `perf:`-linjer i systemloggen (`log show --predicate 'subsystem == "dk.julehygge.JuleHygge"'`).
-- `--kamera-scene-test=MAPPE` gemmer kamerabaggrunden som PNG uden kamera.
+- **Send julemanden/sneploven ind i kameraet** (menuen): sender figuren kun ind i kamerabilledet, så den ses bag dig i mødet. Menupunkterne virker kun, mens kameraet er i brug. Imens kører scenen med 30 billeder/s (ellers 20). Når skærmene holder pause, går julemandens automatiske ture også ind i kameraet.
+- `--kamera-scene-test=MAPPE` gemmer kamerabaggrunden som PNG uden kamera (sender julemand og sneplov ind efter 1 s).
 
 ## Test
 
