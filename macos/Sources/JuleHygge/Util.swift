@@ -78,6 +78,8 @@ final class Flake {
     var x: F = 0, y: F = 0, r: F = 0, vy: F = 0, phase: F = 0, sway: F = 0, swaySpd: F = 0, rot: F = 0, rotSpd: F = 0
     var a = 0
     var crystal = false
+    /// Only some flakes land on window edges; the rest fall past them.
+    var catches = false
 }
 
 final class Spark {
@@ -92,6 +94,12 @@ final class Nisse {
     var variant = ""
     var entering = false, leaving = false, crossing = false
     var tunic = C(115, 120, 130), mitten = C(210, 30, 40), gift = C(40, 140, 70)
+    var tunicIndex = 0, giftIndex = 0
+    /// Meeting another nisse: both stop face to face, and halfway through the gift changes hands
+    /// (handed over, or swapped if both carry one). `meetWith` is set on one of the two only.
+    var meetTimer: F = 0, meetCooldown: F = 0
+    weak var meetWith: Nisse?
+    func refreshVariant() { variant = "\(tunicIndex)-\(carriesGift ? giftIndex : -1)" }
 }
 
 final class PlowBit {

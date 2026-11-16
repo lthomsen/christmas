@@ -13,6 +13,10 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     var stormUntil: Double = -1
     var wind: F = 0
     var fullscreenRects: [CGRect] = []
+    /// Snow on other apps' window edges (WindowSnow.swift): window number → pile, the same as a list, and falling clumps.
+    var ledges: [Int: Ledge] = [:]
+    var ledgeList: [Ledge] = []
+    var clumps: [SnowClump] = []
 
     // julemanden, i globale koordinater (origo øverst til venstre på hovedskærmen)
     var santaActive = false
@@ -26,7 +30,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         "en lille snebold", "en stor snebold", "maven", "hovedet", "øjne af kul", "en gulerodsnæse",
         "knapper", "arme af grene", "et smil", "et rødt halstørklæde", "en høj hat", "en kost - snemanden er færdig!"]
 
-    private var overlays: [ScreenOverlay] = []
+    private(set) var overlays: [ScreenOverlay] = []
     /// The offscreen "third screen" behind the user in the virtual camera; only exists while the camera is in use.
     private var virtualScene: ScreenOverlay?
     private(set) lazy var camera = VirtualCamera(controller: self)
@@ -105,7 +109,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         // Santa (and his sparks/star showers) moves fast and needs 60 fps to look fluent.
         if santaActive || !sparks.isEmpty { return max(calm, powerSave ? 30 : 60) }
         // The plow is slow (~175 pt/s), so 30 fps is smooth enough and costs about half as much.
-        if plow.active || overlays.contains(where: { $0.isBusy }) { return max(calm, powerSave ? 20 : 30) }
+        if plow.active || !clumps.isEmpty || overlays.contains(where: { $0.isBusy }) { return max(calm, powerSave ? 20 : 30) }
         return calm
     }
     private var sleepReasons = Set<String>()
@@ -126,6 +130,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         if santaActive || plow.active { ErrorLog.debug("finish runs: santa=\(santaActive) plow=\(plow.active)") }
         if santaActive { santaActive = false; santaNext = 60 + R() * 120 }
         sparks.removeAll()
+        clumps.removeAll()
         if plow.active { plow.active = false; plow.cooldown = 30 }
         audio.stopAll()
     }
@@ -259,7 +264,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         powerTimer -= dt
         if powerTimer <= 0 { powerTimer = 5; updatePowerSave() }
         fsTimer -= dt
-        if fsTimer <= 0 { fsTimer = 1; fullscreenRects = Self.findFullscreenWindows() }
+        if fsTimer <= 0 {
+            // with snow on windows the scan runs 4× a second, so piles follow moved windows and fall soon after a minimize
+            // and every frame while a window with snow moves, so a minimized window drops its snow at once
+            fsTimer = !cfg.windowSnow ? 1 : ledgeList.contains(where: { $0.moving && $0.hasSnow }) ? 0 : 0.25
+            let scan = Self.scanWindows()
+            fullscreenRects = scan.fullscreen
+            updateLedges(scan.ledges)
+        }
         topTimer -= dt
         if topTimer <= 0 { topTimer = 5; for o in overlays { o.keepOnTop() } }
 
@@ -268,6 +280,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         updateSound(dt)
         updateSparks(dt)
         updatePlow(dt)
+        updateWindowSnow(dt)
         if celebrateAt > 0 && time >= celebrateAt { celebrateAt = -1; snowmanCelebrate() }
         if plowAt >= 0 && time >= plowAt { plowAt = -1; sendPlow() }
 
@@ -315,27 +328,6 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             windTarget = (R() * 2 - 1) * (storm ? 140 : 30) + (storm ? 60 : 0)
         }
         wind += (windTarget - wind) * min(1, dt * 0.5)
-    }
-
-    /// Windows of other apps that exactly cover a screen (fullscreen apps, games, video), in global top-left coordinates.
-    private static func findFullscreenWindows() -> [CGRect] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        let me = ProcessInfo.processInfo.processIdentifier
-        let screens = NSScreen.screens.map { s -> CGRect in
-            let top = NSScreen.screens[0].frame.maxY
-            return CGRect(x: s.frame.minX, y: top - s.frame.maxY, width: s.frame.width, height: s.frame.height)
-        }
-        var out: [CGRect] = []
-        for w in list {
-            guard (w[kCGWindowLayer as String] as? Int) == 0,
-                  (w[kCGWindowOwnerPID as String] as? Int32) != me,
-                  let bd = w[kCGWindowBounds as String] as? NSDictionary,
-                  let r = CGRect(dictionaryRepresentation: bd) else { continue }
-            if screens.contains(where: { abs($0.minX - r.minX) < 2 && abs($0.minY - r.minY) < 2 && abs($0.width - r.width) < 2 && abs($0.height - r.height) < 2 }) {
-                out.append(r)
-            }
-        }
-        return out
     }
 
     // ------------------------------------------------------------------ julemanden
@@ -663,6 +655,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(toggle("Snevejr", { $0.snow }, { $0.snow = $1 }))
         menu.addItem(choice("Snemængde", ["Let sne", "Normal", "Snestorm"], [0, 1, 2], { $0.snowLevel }, { $0.snowLevel = $1 }))
         menu.addItem(toggle("Sne i bunden af skærmen", { $0.snowGround }, { $0.snowGround = $1 }))
+        menu.addItem(toggle("Sne på vinduerne", { $0.windowSnow }, { $0.windowSnow = $1 }))
         snowmanItem = toggle("Snemand", { $0.snowman }, { $0.snowman = $1 })
         menu.addItem(snowmanItem)
         menu.addItem(.separator())
