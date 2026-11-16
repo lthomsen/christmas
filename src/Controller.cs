@@ -146,7 +146,8 @@ namespace JuleHygge
             if (fsTimer <= 0)
             {
                 fsTimer = 1;
-                FullscreenRect = Cfg.PauseFullscreen ? GetFullscreenRect() : Rectangle.Empty;
+                // Always detected: layers either pause or move the snow ground to the screen bottom.
+                FullscreenRect = GetFullscreenRect();
             }
 
             topTimer -= dt;

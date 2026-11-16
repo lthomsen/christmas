@@ -32,4 +32,4 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x). Al bruge
 
 ## Git
 - Git og `gh` er installeret, men ligger måske ikke på PATH i ældre shells. Brug i så fald `C:\Program Files\Git\cmd\git.exe` og `C:\Program Files\GitHub CLI\gh.exe`.
-- Remote er det **private** repo `rkl1976/christmas`.
+- Remote: `rkl1976/christmas` on GitHub. Releases are created with `gh release create` and include the built `JuleHygge.exe`.

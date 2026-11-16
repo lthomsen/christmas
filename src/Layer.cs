@@ -61,6 +61,8 @@ namespace JuleHygge
         public PointF SnowmanPos { get; private set; }
         int W, H;
         float groundY, dpiScale = 1f;
+        // Top of the taskbar. The snow ground sits here, or at the screen bottom while a fullscreen app hides the taskbar.
+        float taskbarY;
 
         IntPtr memDc, hDib, hOldBmp, pixels;
         Bitmap canvas;
@@ -144,7 +146,8 @@ namespace JuleHygge
         {
             ScreenBounds = scr.Bounds;
             W = ScreenBounds.Width; H = ScreenBounds.Height;
-            groundY = scr.WorkingArea.Bottom - ScreenBounds.Top;
+            taskbarY = scr.WorkingArea.Bottom - ScreenBounds.Top;
+            groundY = taskbarY;
             S = Math.Max(0.6f, H / 1080f);
             using (var sg = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, sg.DpiX / 96f);
 
@@ -288,7 +291,11 @@ namespace JuleHygge
         public void Frame(float dt)
         {
             var fs = c.FullscreenRect;
-            if (!fs.IsEmpty && fs.Contains(ScreenBounds))
+            bool fullscreen = !fs.IsEmpty && fs.Contains(ScreenBounds);
+            // With "pause on fullscreen" off, a fullscreen app hides the taskbar, so the snow piles up at the
+            // very bottom of the screen instead (nisser, snowman and plow follow the ground automatically).
+            groundY = fullscreen ? H : taskbarY;
+            if (fullscreen && cfg.PauseFullscreen)
             {
                 if (!paused) { ClearAll(); Present(); paused = true; prevDirty.Clear(); lightsShown = false; }
                 return;
