@@ -2,3 +2,9 @@
 *.exe
 *.pdb
 *.ico
+
+# macOS
+macos/.build/
+macos/build/
+macos/JuleHygge.xcodeproj/xcuserdata/
+macos/JuleHygge.xcodeproj/project.xcworkspace/
