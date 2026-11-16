@@ -64,7 +64,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             DispatchQueue.main.async { self.updateDaily(startup: true) }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.buildOverlays()
+            self?.screensChanged()
         }
         // Stop completely while the displays sleep, the screen is locked or another user is active.
         let ws = NSWorkspace.shared.notificationCenter
@@ -142,6 +142,33 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     // ------------------------------------------------------------------ skærme
+    /// Test aid (--skærmskift-test): rebuilds the overlays every 0.3 s, like rapid display changes.
+    func startDisplayChangeTest() {
+        let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in self?.buildOverlays() }
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    /// The screen directly to the left (dir < 0) or right (dir > 0) of `o`, edge to edge, if any.
+    func neighbor(of o: ScreenOverlay, dir: F) -> ScreenOverlay? {
+        overlays.first { other in
+            other !== o && (dir > 0 ? abs(other.screenBounds.minX - o.screenBounds.maxX) < 2 : abs(other.screenBounds.maxX - o.screenBounds.minX) < 2)
+        }
+    }
+
+    /// Display changes arrive in bursts (connecting a screen sends many notifications within milliseconds),
+    /// so the overlays are rebuilt once things have settled, and the frame source is moved to the current main screen.
+    private var screenChangeWork: DispatchWorkItem?
+    private func screensChanged() {
+        screenChangeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            buildOverlays()
+            if !asleep { startTimer() }
+        }
+        screenChangeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
     private func buildOverlays() {
         for o in overlays { o.close() }
         overlays.removeAll()
@@ -174,6 +201,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
 
         updateWind(dt)
         updateSanta(dt)
+        updateSound(dt)
         updateSparks(dt)
         updatePlow(dt)
         if celebrateAt > 0 && time >= celebrateAt { celebrateAt = -1; snowmanCelebrate() }
@@ -287,6 +315,44 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             santaNext = 60 + R() * 120
         }
     }
+
+    // ------------------------------------------------------------------ lyd
+    private let audio = AudioHub()
+    private lazy var jingle = audio.voice(Synth.jingle, loops: true)
+    private lazy var plowEngine = audio.voice(Synth.plowEngine, loops: true)
+    private lazy var plowScrape = audio.voice(Synth.plowScrape, loops: true)
+    private lazy var plowHorn = audio.voice(Synth.plowHorn, loops: false)
+    private var hornedThisRun = false
+
+    private var volume: Float { [0.15, 0.35, 0.6][max(0, min(2, cfg.soundLevel))] }
+    private var soundMuted: Bool { cfg.pauseFullscreen && !fullscreenRects.isEmpty }
+
+    /// Pans each sound with what makes it (Santa, the plow) across all screens and fades it at the edges.
+    private func updateSound(_ dt: F) {
+        let d = Float(dt)
+        if cfg.sound || jingle.playing {
+            let span = max(1, santaMaxX - santaMinX)
+            let margin = 330 * santaScale
+            let presence = max(0, min(1, min(santaX - (santaMinX - margin), (santaMaxX + margin) - santaX) / margin))
+            let on = santaActive && cfg.sound && !soundMuted
+            jingle.update(level: on ? Float(presence) * volume : 0, pan: Float((santaX - santaMinX) / span * 2 - 1), dt: d)
+        }
+        if cfg.plowSound || plowEngine.playing || plowScrape.playing {
+            let span = max(1, plow.maxX - plow.minX)
+            let margin: F = 300
+            let presence = max(0, min(1, min(plow.gx - (plow.minX - margin), (plow.maxX + margin) - plow.gx) / margin))
+            let pan = Float((plow.gx - plow.minX) / span * 2 - 1)
+            let on = plow.active && cfg.plowSound && !soundMuted
+            plowEngine.update(level: on ? Float(presence) * volume * 0.8 : 0, pan: pan, dt: d)
+            // scraping gets louder with the amount of snow in front of the blade
+            let load = Float(min(1, sqrt(plow.pushed / 2000)))
+            plowScrape.update(level: on ? Float(presence) * volume * (0.15 + 0.85 * load) : 0, pan: pan, dt: d)
+            if on && !hornedThisRun && presence > 0.6 { hornedThisRun = true; plowHorn.playOnce(level: volume, pan: pan) }
+        }
+        if !plow.active { hornedThisRun = false }
+        audio.idleCheck()
+    }
+
 
     private func updateSparks(_ dt: F) {
         sparks.removeAll { sp in
@@ -498,10 +564,13 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
 
         menu.addItem(toggle("Julemanden", { $0.santa }, { $0.santa = $1 }))
         menu.addItem(item("Send julemanden afsted nu!") { [unowned self] _ in launchSanta() })
+        menu.addItem(toggle("Lyd: bjælder og jingle når julemanden flyver", { $0.sound }, { $0.sound = $1 }))
         menu.addItem(.separator())
 
         menu.addItem(toggle("Sneplov rydder sneen", { $0.plow }, { $0.plow = $1 }))
         menu.addItem(item("Send sneploven ud nu!") { [unowned self] _ in sendPlow() })
+        menu.addItem(toggle("Lyd: motor, skraben og horn fra sneploven", { $0.plowSound }, { $0.plowSound = $1 }))
+        menu.addItem(choice("Lydstyrke", ["Lav", "Middel", "Høj"], [0, 1, 2], { $0.soundLevel }, { $0.soundLevel = $1 }))
         menu.addItem(.separator())
 
         menu.addItem(toggle("Nisser", { $0.nisser }, { $0.nisser = $1 }))
@@ -571,6 +640,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     private func exit() {
+        audio.stopAll()
         stopTicker()
         calendarWindow?.close()
         for o in overlays { o.close() }
@@ -590,12 +660,23 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         return "★ \(d) dage til juleaften ★"
     }
 
+    /// Start at login is a plain login item. (Restart after a crash is handled by the supervisor in main.swift:
+    /// launch agents via SMAppService.agent are tied to the code signature, which changes with every ad-hoc build.)
     static var autostart: Bool { SMAppService.mainApp.status == .enabled }
 
     static func setAutostart(_ on: Bool) {
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch { ErrorLog.write("autostart: \(error)") }
+    }
+
+    /// A short-lived test version registered a launch agent; remove it and keep a plain login item instead.
+    static func migrateAutostart() {
+        let agent = SMAppService.agent(plistName: "dk.julehygge.JuleHygge.agent.plist")
+        if agent.status != .notRegistered {
+            try? agent.unregister()
+            if !autostart { setAutostart(true) }
+        }
     }
 }
 

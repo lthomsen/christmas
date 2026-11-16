@@ -4,10 +4,12 @@ import Foundation
 /// ~/Library/Application Support/JuleHygge/settings.ini (JULE_SETTINGS overrides the path, handy for tests).
 final class Settings {
     var snow = true, snowGround = true, santa = true, nisser = true, lights = true,
-        pauseFullscreen = true, snowman = true, allScreens = true, plow = true
+        pauseFullscreen = true, snowman = true, allScreens = true, plow = true,
+        sound = false, plowSound = false   // lyd er slået fra, indtil man selv slår den til
     var snowLevel = 1          // 0 = let, 1 = normal, 2 = snestorm
     var nisseCount = 3         // pr. skærm
     var powerSave = 2          // 0 = fra, 1 = altid til, 2 = kun på batteri
+    var soundLevel = 1         // 0 = lav, 1 = middel, 2 = høj
     var frameRate = 20         // billeder/s når scenen er rolig (12, 20, 30 eller 60)
     var snowmanSeenStage = 0
     var calendarYear = 0
@@ -45,6 +47,9 @@ final class Settings {
         s.snowman = b("Snowman", s.snowman)
         s.allScreens = b("AllScreens", s.allScreens)
         s.plow = b("Plow", s.plow)
+        s.sound = b("Sound", s.sound)
+        s.plowSound = b("PlowSound", s.plowSound)
+        s.soundLevel = max(0, min(2, i("SoundLevel", s.soundLevel)))
         s.snowLevel = max(0, min(2, i("SnowLevel", s.snowLevel)))
         s.nisseCount = max(1, min(12, i("NisseCount", s.nisseCount)))
         s.powerSave = max(0, min(2, i("PowerSave", s.powerSave)))
@@ -66,7 +71,7 @@ final class Settings {
         let lines = [
             "Snow=" + b(snow), "SnowGround=" + b(snowGround), "Santa=" + b(santa),
             "Nisser=" + b(nisser), "Lights=" + b(lights), "PauseFullscreen=" + b(pauseFullscreen),
-            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow),
+            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "Sound=" + b(sound), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
             "SnowLevel=\(snowLevel)", "NisseCount=\(nisseCount)", "PowerSave=\(powerSave)", "FrameRate=\(frameRate)",
             "SnowmanSeenStage=\(snowmanSeenStage)", "CalendarYear=\(calendarYear)",
             "FirstRun=" + ds(firstRun), "LastDoorNotice=" + ds(lastDoorNotice),

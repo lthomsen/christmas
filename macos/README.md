@@ -5,11 +5,13 @@ Native macOS-udgave (Swift + AppKit + Core Animation) af juleoverlayet. Samme in
 - Bor i **menulinjen** (snefnug-ikonet), ingen Dock-ikon. Klik på ikonet for indstillinger og julekalender.
 - Overlayet ligger over alle vinduer og Docken, men man klikker igennem det. Det følger med til alle Spaces.
 - Sne og nisser ligger i **bunden af skærmen** på alle skærme.
-- Mængden varierer organisk: snefaldet svinger langsomt mellem ca. 60 % og 140 % af den valgte mængde (to bølger på ca. 3 og 7 minutter), og hvert 1½–3 minut kommer eller går en nisse (højst ±2 fra det valgte antal, med træk tilbage mod det). Nye nisser går ind fra skærmkanten, og nisser der går, går ud ad den nærmeste kant.
+- Mængden varierer organisk: snefaldet svinger langsomt mellem ca. 60 % og 140 % af den valgte mængde (to bølger på ca. 3 og 7 minutter), og hvert 1½–3 minut kommer eller går en nisse (højst ±2 fra det valgte antal, med træk tilbage mod det). Nye nisser går ind fra skærmkanten. Nisser der skal gå, går ud ad en kant uden skærm bagved, hvis der er en.
+- **Nisser skifter skærm:** Når en nisse når en kant med en skærm ved siden af, går den cirka halvdelen af gangene videre over på den anden skærm (samme tøj og retning) i stedet for at vende om.
 - Pauser automatisk, når en app kører i fuldskærm (kan slås fra).
 - **Strømspare** slår til på batteri eller i macOS' strømsparetilstand: sne kun nederst og 20 i stedet for 30 billeder/s.
+- **Lyd** (slået fra som standard, slås til hver for sig i menuen): julemandens kane spiller bjælder og omkvædet af "Jingle Bells" (Pierpont 1857, fri af ophavsret), og sneploven har dieselmotor, skraben der bliver højere med mængden af sne, og et kort horn når den kører ind. Lyden panoreres med figuren hen over skærmene, fader ind og ud ved kanterne og er slået fra under fuldskærmspause. Alt syntetiseres i koden (ingen lydfiler), og lydmotoren kører kun mens noget spiller.
 - Notifikationer når dagens låge er klar (klik åbner kalenderen).
-- "Start ved login" i menuen bruger `SMAppService`.
+- "Start ved login" er et almindeligt login-emne. Appen **genstarter sig selv, hvis den crasher**: den starter som en lille vagtproces, der kører selve appen som underproces og starter den igen 5 sekunder efter et crash (den giver op efter 3 hurtige crash i træk). Afslutter man fra menuen, lukker begge. Derfor ses to `JuleHygge`-processer i Aktivitetsovervågning. (En launch agent via `SMAppService.agent` blev afvist af macOS ved hver ny ad-hoc-build — "Launch Constraint Violation" — fordi den er bundet til kodesignaturen.)
 - Indstillinger: `~/Library/Application Support/JuleHygge/settings.ini` (samme format som Windows). Fejllog: `~/Library/Logs/JuleHygge.log`.
 
 ## Byg og kør
@@ -24,7 +26,7 @@ Kræver Xcode eller Command Line Tools (Swift 5.10+), macOS 14+.
 open build/JuleHygge.app
 ```
 
-Installér i `~/Applications` med start ved login (login-elementet peger på den installerede kopi, så senere builds ikke ødelægger det):
+Installér i `~/Applications` med start ved login (login-emnet peger på den installerede kopi, så senere builds ikke ødelægger det):
 
 ```bash
 ./install.sh
@@ -46,8 +48,11 @@ Appen er ad-hoc-signeret; til distribution kræves Developer ID-signering og not
 | `JULE_FPS=N` | fast billedfrekvens (til målinger) |
 | `JULE_DEEPSNOW=1` | starter med fuld snedrive (til test af sneploven) |
 | `JULE_TICKS=1` | skriver faktiske billeder/s til stderr |
+| `--skærmskift-test` | genopbygger overlay-vinduerne hvert 0,3 s (stresstest af skærmskift) |
+| `--lyd-test=MAPPE` | gemmer de syntetiserede lyde som WAV-filer (så man kan lytte til dem) og afslutter |
 | `JULE_NISSE_SECONDS=N` | nisser kommer/går hvert N. sekund, og antal/snemængde skrives til stderr |
-| `--login=on` / `--login=off` | slår start ved login til/fra |
+| `--register-login` / `--unregister-login` | slår start ved login til/fra og afslutter |
+| `JULE_NO_SUPERVISOR=1` | kør uden vagtproces (testparametrene som `--julemand` slår den også fra) |
 
 Eksempel (kør binæren direkte for at kunne sætte miljøvariabler):
 
@@ -64,6 +69,7 @@ JULE_SETTINGS=$PWD/build/test.ini JULE_DATE=2026-12-13 build/JuleHygge.app/Conte
 | `Sources/JuleHygge/Overlay.swift` | Ét klik-igennem vindue pr. skærm: sne, sneplov, nisser, julelys, snemand |
 | `Sources/JuleHygge/Calendar.swift` | Julekalender-vinduet og indholdet bag lågerne |
 | `Sources/JuleHygge/Settings.swift` | Indlæsning og gemning af indstillinger |
+| `Sources/JuleHygge/Sound.swift` | Lydsyntese (jingle, sneplov) og delt lydmotor |
 | `Sources/JuleHygge/Icon.swift` | Snefnug-ikonet (menulinje og app-ikon, tegnes i koden) |
 | `install.sh` / `measure.sh` | installation med start ved login / CPU-måling af app og WindowServer |
 | `Sources/JuleHygge/Util.swift` | Dato, log, dataklasser og GDI+-agtige tegnehjælpere |

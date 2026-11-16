@@ -89,7 +89,7 @@ final class Nisse {
     var state = 0           // 0 = går, 1 = står stille, 2 = vinker
     var carriesGift = false
     var variant = ""
-    var entering = false, leaving = false
+    var entering = false, leaving = false, crossing = false
     var tunic = C(115, 120, 130), mitten = C(210, 30, 40), gift = C(40, 140, 70)
 }
 

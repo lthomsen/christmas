@@ -40,4 +40,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Skærmbilleder kræver skærmoptagelsestilladelse. Brug i stedet `--snapshot=MAPPE[,SEK]`, som gemmer overlayet som PNG.
 - Brug `JULE_SETTINGS=<sti i projektet>` ved test med `JULE_DATE`, så de rigtige indstillinger ikke ændres.
 - **Strøm:** Mål med `macos/measure.sh` før og efter ændringer i tegnekoden — både app og WindowServer. Brug ikke Core Animation-animationer (de kører med 120 Hz); alt drives af den fælles timer. Se afsnittet "Strømforbrug" i `macos/README.md`.
+- Figurernes tegne-closures må aldrig holde overlayet som `unowned` (brug `[weak self]`): ved skærmskift kan AppKit bede et lag tegne, mens overlayet nedlægges. Det crashede appen, da en ekstern skærm blev taget ud (rettet 2026-11-16).
+- Genstart efter crash klares af vagtprocessen i `main.swift`, ikke af en launch agent: `SMAppService.agent` er bundet til kodesignaturen og afvises efter hver ad-hoc-build. Når du tester med `build/`-kopien, så luk først den installerede app (`osascript -e 'tell application id "dk.julehygge.JuleHygge" to quit'`), ellers lukker testkopien sig selv (kun én ad gangen).
+- Lyd (kun macOS) syntetiseres i `Sound.swift` — stadig ingen lydfiler. Lyd skal altid være slået fra som standard.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

@@ -5,10 +5,14 @@ set -euo pipefail
 cd "${0:A:h}"
 ./build.sh
 DEST="$HOME/Applications/JuleHygge.app"
+osascript -e 'tell application id "dk.julehygge.JuleHygge" to quit' 2>/dev/null || true
+sleep 1
 pkill -x JuleHygge 2>/dev/null || true
 sleep 1
 mkdir -p "$HOME/Applications"
 rm -rf "$DEST"
 cp -R build/JuleHygge.app "$DEST"
-open "$DEST" --args --login=on
-echo "Installeret: $DEST (start ved login er slået til)"
+# Plain login item; the app's own supervisor restarts it after a crash.
+"$DEST/Contents/MacOS/JuleHygge" --register-login || echo "Kunne ikke slå start ved login til (se Systemindstillinger > Generelt > Login-emner)"
+open "$DEST"
+echo "Installeret: $DEST (start ved login og genstart efter crash er slået til)"

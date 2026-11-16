@@ -34,6 +34,12 @@ final class Sprite: NSObject, CALayerDelegate {
 
     func hide() { layer.isHidden = true }
 
+    /// Disconnects the layer from this sprite, so it can never ask for a drawing again (used when a screen goes away).
+    func detach() {
+        layer.delegate = nil
+        layer.removeFromSuperlayer()
+    }
+
     func draw(_ layer: CALayer, in ctx: CGContext) {
         ctx.translateBy(x: 0, y: layer.bounds.height)
         ctx.scaleBy(x: 1, y: -1)
@@ -199,13 +205,13 @@ final class ScreenOverlay {
         root = view.layer!
 
         let h = H
-        lightsSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.renderLights(g) }
+        lightsSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.renderLights(g) }
         lightsLayer.frame = root.bounds
         lightsLayer.isHidden = true
         root.addSublayer(lightsLayer)
         sparkPool = DotPool(in: root, screenHeight: h)
-        santaSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.drawSanta(g) }
-        snowmanSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.drawSnowman(g) }
+        santaSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSanta(g) }
+        snowmanSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSnowman(g) }
         for l in [groundFill, groundLine] {
             l.frame = root.bounds
             l.actions = ["path": NSNull(), "hidden": NSNull()]
@@ -218,13 +224,21 @@ final class ScreenOverlay {
         nisseLayer.frame = root.bounds
         root.addSublayer(nisseLayer)
         plowBitPool = DotPool(in: root, screenHeight: h)
-        plowSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.drawPlow(g) }
+        plowSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawPlow(g) }
         flakePool = DotPool(in: root, screenHeight: h)
 
         window.orderFrontRegardless()
     }
 
-    func close() { window.orderOut(nil); window.close() }
+    /// Tears the overlay down in a safe order: first every sprite is disconnected from its layer, then the
+    /// layers are removed, and only then is the window closed. (A display change can make AppKit redraw
+    /// layers of a window that is being released; a sprite must not draw for an overlay that is going away.)
+    func close() {
+        for sp in [lightsSprite, santaSprite, snowmanSprite, plowSprite] { sp?.detach() }
+        root.sublayers?.forEach { $0.removeFromSuperlayer() }
+        window.orderOut(nil)
+        window.close()
+    }
 
     func keepOnTop() { if !paused { window.orderFrontRegardless() } }
 
@@ -762,11 +776,13 @@ final class ScreenOverlay {
         } else if staying > target {
             if !cfg.nisser {
                 while !nisser.isEmpty { removeNisse(at: nisser.count - 1) }
-            } else if let n = nisser.last(where: { !$0.leaving }) {
-                // walks off at the nearest edge
+            } else if let n = nisser.last(where: { !$0.leaving && !$0.entering && !$0.crossing }) {
+                // Walks off at an edge with no screen beyond it if there is one (so the count really goes down),
+                // otherwise at the nearest edge, where it crosses to the neighbouring screen.
                 n.leaving = true
                 n.state = 0
-                n.dir = n.x < W / 2 ? -1 : 1
+                let left = c.neighbor(of: self, dir: -1) == nil, right = c.neighbor(of: self, dir: 1) == nil
+                if left != right { n.dir = left ? -1 : 1 } else { n.dir = n.x < W / 2 ? -1 : 1 }
             }
         }
 
@@ -779,11 +795,17 @@ final class ScreenOverlay {
                 n.x += n.dir * n.speed * dt
                 n.walkPhase += dt * n.speed / (4.5 * S)
                 if n.entering && n.x > 30 * S && n.x < W - 30 * S { n.entering = false }
-                if !n.entering && !n.leaving {
-                    if n.x < 30 * S { n.x = 30 * S; n.dir = 1 }
-                    if n.x > W - 30 * S { n.x = W - 30 * S; n.dir = -1 }
+                if !n.entering && !n.leaving && !n.crossing {
+                    // At an edge with a neighbouring screen, about half the nisser walk on over to it.
+                    if n.x < 30 * S {
+                        if c.neighbor(of: self, dir: -1) != nil && R() < 0.5 { n.crossing = true } else { n.x = 30 * S; n.dir = 1 }
+                    }
+                    if n.x > W - 30 * S {
+                        if c.neighbor(of: self, dir: 1) != nil && R() < 0.5 { n.crossing = true } else { n.x = W - 30 * S; n.dir = -1 }
+                    }
                 }
-                if n.entering || n.leaving { continue }   // no stopping or turning while arriving or leaving
+                // no stopping or turning while arriving, leaving or crossing to another screen
+                if n.entering || n.leaving || n.crossing { continue }
                 if n.stateTimer <= 0 {
                     let r = R()
                     if r < 0.3 { n.state = 1; n.stateTimer = 2 + R() * 3 }
@@ -820,11 +842,30 @@ final class ScreenOverlay {
         n.variant = "\(ti)-\(n.carriesGift ? gi : -1)"
         n.stateTimer = 4 + R() * 6
         n.t = R() * 10
+        appendNisse(n)
+    }
+
+    private func appendNisse(_ n: Nisse) {
         nisser.append(n)
         let l = CALayer()
         l.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "transform": NSNull(), "hidden": NSNull()]
         nisseLayer.addSublayer(l)
         nisseLayers.append(l)
+    }
+
+    /// A nisse arriving from the neighbouring screen: it walks in at the matching edge, same clothes and direction.
+    func receiveNisse(_ n: Nisse, fromScale oldS: F) {
+        n.crossing = false
+        n.leaving = false
+        n.entering = true
+        n.state = 0
+        n.speed = n.speed / oldS * S
+        n.x = n.dir > 0 ? -40 * S : W + 40 * S
+        n.stateTimer = 4 + R() * 6
+        appendNisse(n)
+        if ProcessInfo.processInfo.environment["JULE_NISSE_SECONDS"] != nil {
+            FileHandle.standardError.write("t=\(Int(c.time)) nisse krydsede til skærm ved x=\(Int(screenBounds.minX)) retning \(n.dir > 0 ? "→" : "←") (\(nisser.count) nisser her nu)\n".data(using: .utf8)!)
+        }
     }
 
     private func removeNisse(at i: Int) {
@@ -836,9 +877,13 @@ final class ScreenOverlay {
     private static let walkFrames = 16, standFrames = 8, waveFrames = 8
 
     private func renderNisser() {
-        // nisser that have walked off the screen are gone
-        for i in stride(from: nisser.count - 1, through: 0, by: -1) where nisser[i].leaving && (nisser[i].x < -45 * S || nisser[i].x > W + 45 * S) {
+        // Nisser that have walked off the screen continue on the neighbouring screen in that direction, if there
+        // is one; otherwise they are gone.
+        for i in stride(from: nisser.count - 1, through: 0, by: -1) {
+            let n = nisser[i]
+            guard (n.leaving || n.crossing) && (n.x < -45 * S || n.x > W + 45 * S) else { continue }
             removeNisse(at: i)
+            if let next = c.neighbor(of: self, dir: n.dir), cfg.nisser { next.receiveNisse(n, fromScale: S) }
         }
         for (i, n) in nisser.enumerated() {
             let sc = S * n.size
