@@ -2,3 +2,7 @@
 *.exe
 *.pdb
 *.ico
+
+# macOS
+macos/.build/
+macos/build/

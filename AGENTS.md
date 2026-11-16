@@ -1,6 +1,6 @@
 # AGENTS.md
 
-JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x). Al brugervendt tekst er på **dansk**.
+JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`, og en native macOS-udgave (Swift/AppKit) i `macos/`. Al brugervendt tekst er på **dansk**.
 
 ## Byg
 - Byg med `powershell -ExecutionPolicy Bypass -File .\build.ps1`. Den bruger den `csc.exe`, der følger med Windows. Der er **intet .NET SDK** på maskinen, og der må ikke bruges NuGet-pakker.
@@ -33,3 +33,10 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x). Al bruge
 ## Git
 - Git og `gh` er installeret, men ligger måske ikke på PATH i ældre shells. Brug i så fald `C:\Program Files\Git\cmd\git.exe` og `C:\Program Files\GitHub CLI\gh.exe`.
 - Remote: `rkl1976/christmas` on GitHub. Releases are created with `gh release create` and include the built `JuleHygge.exe`.
+
+## macOS (`macos/`)
+- Byg med `macos/build.sh` (Swift Package + `.app`-bundle, ad-hoc-signeret). Luk appen først: `pkill -x JuleHygge`.
+- Ændringer i figurer/logik bør laves i **begge** udgaver. Tegnekoden i `Overlay.swift` følger `src/Layer.cs` linje for linje (origo øverst til venstre).
+- Skærmbilleder kræver skærmoptagelsestilladelse. Brug i stedet `--snapshot=MAPPE[,SEK]`, som gemmer overlayet som PNG.
+- Brug `JULE_SETTINGS=<sti i projektet>` ved test med `JULE_DATE`, så de rigtige indstillinger ikke ændres.
+- Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

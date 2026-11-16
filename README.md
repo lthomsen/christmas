@@ -1,6 +1,6 @@
 # JuleHygge 🎄
 
-Et lille juleoverlay til Windows: snevejr, sne der lægger sig på proceslinjen, julemanden i kane med rensdyr (og Rudolf), nisser der går rundt på proceslinjen, julelys langs toppen af skærmen, en snemand der bliver bygget lidt mere hver dag, og en julekalender med 24 låger.
+Et lille juleoverlay til Windows og macOS: snevejr, sne der lægger sig på proceslinjen, julemanden i kane med rensdyr (og Rudolf), nisser der går rundt på proceslinjen, julelys langs toppen af skærmen, en snemand der bliver bygget lidt mere hver dag, og en julekalender med 24 låger.
 
 - Overlayet er gennemsigtigt, og man kan klikke igennem det, så det forstyrrer ikke arbejdet.
 - Det virker på **alle skærme**. Julemanden flyver hen over de skærme, der står ved siden af hinanden.
@@ -10,7 +10,10 @@ Et lille juleoverlay til Windows: snevejr, sne der lægger sig på proceslinjen,
 - Animationen pauser automatisk, når et program kører i fuldskærm (spil, film).
 - Indstillingerne gemmes i `%APPDATA%\JuleHygge\settings.ini`.
 
-## Byg og kør
+## macOS
+Se [macos/README.md](macos/README.md) — native Swift-udgave i menulinjen med samme figurer og julekalender. Byg med `macos/build.sh`.
+
+## Byg og kør (Windows)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1
