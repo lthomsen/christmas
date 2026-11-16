@@ -167,6 +167,43 @@ extension Controller {
         ErrorLog.debug("window \(l.id) gone: \(clumps.count) clumps falling")
     }
 
+    /// When the snow hangs far down somewhere, or the pile is nearly full, there is about a 1-in-15 chance per
+    /// second that a 20–50 pt stretch around the longest drape breaks off: the drape and most of the pile above
+    /// it fall as clumps (softly tapered at the ends of the break), and the edge then fills up again.
+    private func breakOff(_ l: Ledge, _ dt: F) {
+        let n = l.cols.count
+        guard n > 8 else { return }
+        var best = -1, bestLoad: F = 0
+        for i in 0..<n {
+            let x = l.settled.minX + F(i) * Ledge.step
+            guard l.isVisible(x) else { continue }
+            let load = l.hang[i] + l.cols[i] * 0.5
+            if load > bestLoad { bestLoad = load; best = i }
+        }
+        let full = l.hang.max() ?? 0 > 9 || (l.cols.max() ?? 0) > (effectiveSnowLevel == 2 ? 12.5 : 9)
+        guard best >= 0, full, R() < dt / 15 else { return }
+        let half = 2 + Int(R() * 5)            // 5–13 columns ≈ 20–50 pt
+        for j in max(0, best - half)...min(n - 1, best + half) {
+            let k = 1 - F(abs(j - best)) / F(half + 1)       // 1 in the middle, tapering toward the ends
+            let fall = 0.5 + 0.5 * cos((1 - k) * .pi)          // soft edges of the break
+            let dropPile = l.cols[j] * 0.65 * fall, dropHang = l.hang[j] * fall
+            l.cols[j] -= dropPile; l.hang[j] -= dropHang
+            let amount = dropPile + dropHang
+            guard amount > 0.4 else { continue }
+            for _ in 0..<min(4, Int(amount / 2.5) + 1) where clumps.count < 700 {
+                let c = SnowClump()
+                c.x = l.settled.minX + F(j) * Ledge.step + R() * Ledge.step
+                c.y = l.settled.minY - dropPile * R() + dropHang * R()   // from the pile's top down to the drape's end
+                c.vx = (R() - 0.5) * 8 + wind * 0.05
+                c.vy = R() * 15
+                c.r = 1.6 + R() * 2
+                clumps.append(c)
+            }
+        }
+        l.version += 1
+        ErrorLog.debug("window \(l.id): snow broke off at column \(best) (\(half * 2 + 1) columns)")
+    }
+
     /// Settles each pile (slopes, rounded ends, no higher than ~10 pt), melts it when snow is off,
     /// and moves the falling clumps.
     func updateWindowSnow(_ dt: F) {
@@ -222,6 +259,8 @@ extension Controller {
                 hangChanged += abs(l.hang[i] - old)
                 if l.hang[i] > 0.3 { any = true }
             }
+            // a full edge does not just keep growing: now and then a heavy stretch breaks off and falls
+            if !melt && any { breakOff(l, dt) }
             if melt || !any || hangChanged > 0.5 { l.version += 1 }
             l.hasSnow = any
         }
