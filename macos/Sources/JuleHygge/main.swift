@@ -13,7 +13,7 @@ if let i = args.firstIndex(of: "--icon"), i + 1 < args.count {
 if let a = args.first(where: { $0.hasPrefix("--lyd-test=") }) {
     let dir = String(a.dropFirst(11))
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    for (name, make) in [("julemand-jingle", Synth.jingle), ("sneplov-motor", Synth.plowEngine), ("sneplov-skraben", Synth.plowScrape), ("sneplov-horn", Synth.plowHorn)] {
+    for (name, make) in Synth.Tune.all.map({ t in ("julemand-" + t.name, { Synth.jingle(t) }) }) + [("sneplov-motor", Synth.plowEngine), ("sneplov-skraben", Synth.plowScrape), ("sneplov-horn", Synth.plowHorn)] {
         guard let buf = make() else { continue }
         let url = URL(fileURLWithPath: dir).appendingPathComponent(name + ".wav")
         if let f = try? AVAudioFile(forWriting: url, settings: buf.format.settings) { try? f.write(from: buf) }

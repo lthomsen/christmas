@@ -9,7 +9,7 @@ Native macOS-udgave (Swift + AppKit + Core Animation) af juleoverlayet. Samme in
 - **Nisser skifter skærm:** Når en nisse når en kant med en skærm ved siden af, går den cirka halvdelen af gangene videre over på den anden skærm (samme tøj og retning) i stedet for at vende om.
 - Pauser automatisk, når en app kører i fuldskærm (kan slås fra).
 - **Strømspare** slår til på batteri eller i macOS' strømsparetilstand: sne kun nederst og 20 i stedet for 30 billeder/s.
-- **Lyd** (slået fra som standard, slås til hver for sig i menuen): julemandens kane spiller bjælder og omkvædet af "Jingle Bells" (Pierpont 1857, fri af ophavsret), og sneploven har dieselmotor, skraben der bliver højere med mængden af sne, og et kort horn når den kører ind. Lyden panoreres med figuren hen over skærmene, fader ind og ud ved kanterne og er slået fra under fuldskærmspause. Alt syntetiseres i koden (ingen lydfiler), og lydmotoren kører kun mens noget spiller.
+- **Lyd** (slået fra som standard, slås til hver for sig i menuen): julemandens kane spiller bjælder og en af tre melodier, valgt tilfældigt for hver tur: omkvædet af "Jingle Bells" (Pierpont 1857), "Deck the Halls" (walisisk folkemelodi) eller "We Wish You a Merry Christmas" (engelsk folkemelodi), alle fri af ophavsret. Julemandens fart varierer ±10 % fra tur til tur, og melodien spilles med samme tempo (lidt hurtigere og lysere, eller langsommere og dybere). og sneploven har dieselmotor, skraben der bliver højere med mængden af sne, og et kort horn når den kører ind. Lyden panoreres med figuren hen over skærmene, fader ind og ud ved kanterne og er slået fra under fuldskærmspause. Alt syntetiseres i koden (ingen lydfiler), og lydmotoren kører kun mens noget spiller.
 - Notifikationer når dagens låge er klar (klik åbner kalenderen).
 - "Start ved login" er et almindeligt login-emne. Appen **genstarter sig selv, hvis den crasher**: den starter som en lille vagtproces, der kører selve appen som underproces og starter den igen 5 sekunder efter et crash (den giver op efter 3 hurtige crash i træk). Afslutter man fra menuen, lukker begge. Derfor ses to `JuleHygge`-processer i Aktivitetsovervågning. (En launch agent via `SMAppService.agent` blev afvist af macOS ved hver ny ad-hoc-build — "Launch Constraint Violation" — fordi den er bundet til kodesignaturen.)
 - Indstillinger: `~/Library/Application Support/JuleHygge/settings.ini` (samme format som Windows). Fejllog: `~/Library/Logs/JuleHygge.log`.
@@ -56,6 +56,7 @@ Et virtuelt kamera, der viser dig foran en levende julescene: nattehimmel, sneve
 | `JULE_DATE=yyyy-MM-dd` | lader som om det er en anden dato |
 | `JULE_SETTINGS=sti` | brug en anden settings-fil (så tests ikke ændrer de rigtige indstillinger) |
 | `JULE_DEBUG=1` | debuglinjer i fejlloggen |
+| `JULE_LOG=<sti>` | fejlloggen skrives her i stedet for `~/Library/Logs/JuleHygge.log` (til test i projektet) |
 | `JULE_FPS=N` | fast billedfrekvens (til målinger) |
 | `JULE_DEEPSNOW=1` | starter med fuld snedrive (til test af sneploven) |
 | `JULE_TICKS=1` | skriver faktiske billeder/s til stderr |
@@ -106,7 +107,7 @@ Valg der holder det nede:
 - **Nisser** tegnes ikke pr. frame: hver positur (16 gangbilleder, 8 stå, 8 vinke) tegnes én gang pr. tøjvariant og genbruges; størrelse og retning er GPU-skalering.
 - **Julelys**: ledning og slukkede pærer tegnes én gang; hver pæres lyse udgave er et færdigt billede, hvis gennemsigtighed ændres ~7 gange/s.
 - Julemand og sneplov flyttes hver frame, men gentegnes kun hver anden. Snedriven opdateres 5 gange/s.
-- Timeren stopper helt, når skærmen sover eller er låst.
+- Timeren stopper helt, når skærmen sover, pauseskærmen kører, eller skærmen er låst. Er julemanden eller sneploven undervejs, afsluttes turen med det samme, som om de var nået frem (ellers blev de hængende "på vej", og melodien kørte videre i ring). Det samme sker, hvis der af anden grund ikke er kommet billeder i over 2 sekunder. Test med `swift tools/pauseskaerm-signal.swift start|stop`.
 
 ### Tegning
 Hver figur (julemanden, nisser, snemand, sneplov, julelys) er et lille `CALayer`, der kun gentegnes i sin egen størrelse. Snefnug, gnister og sneklumper er genbrugte billedlag, som kun flyttes. Sneploven køres af `Controller` i globale koordinater, så den kører én sammenhængende tur hen over skærme, der står ved siden af hinanden (ligesom julemanden). Snedriven er et `CAShapeLayer`. Al sammensætning sker på GPU'en, så der er ingen dirty-rect-håndtering som i Windows-versionen. Tegnekoden bruger skærmkoordinater med origo øverst til venstre, så den kan sammenlignes linje for linje med `src/Layer.cs`.

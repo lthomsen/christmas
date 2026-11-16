@@ -72,15 +72,18 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.screensChanged()
         }
-        // Stop completely while the displays sleep, the screen is locked or another user is active.
+        // Stop completely while the displays sleep, the screen saver runs, the screen is locked or another user is active.
+        // Each reason is tracked on its own, so e.g. the screen saver ending in front of the lock screen does not wake the overlay.
         let ws = NSWorkspace.shared.notificationCenter
-        for (name, sleeping) in [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false),
-                                 (NSWorkspace.sessionDidResignActiveNotification, true), (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
-            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.setAsleep(sleeping) }
+        for (name, reason, sleeping) in [(NSWorkspace.screensDidSleepNotification, "display", true), (NSWorkspace.screensDidWakeNotification, "display", false),
+                                         (NSWorkspace.sessionDidResignActiveNotification, "session", true), (NSWorkspace.sessionDidBecomeActiveNotification, "session", false)] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.setAsleep(reason, sleeping) }
         }
         let dnc = DistributedNotificationCenter.default()
-        dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.setAsleep(true) }
-        dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in self?.setAsleep(false) }
+        for (name, reason, sleeping) in [("com.apple.screenIsLocked", "lock", true), ("com.apple.screenIsUnlocked", "lock", false),
+                                         ("com.apple.screensaver.didstart", "saver", true), ("com.apple.screensaver.didstop", "saver", false)] {
+            dnc.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in self?.setAsleep(reason, sleeping) }
+        }
         updatePowerSave()
         startTimer()
     }
@@ -105,10 +108,26 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         if plow.active || overlays.contains(where: { $0.isBusy }) { return max(calm, powerSave ? 20 : 30) }
         return calm
     }
-    private func setAsleep(_ s: Bool) {
+    private var sleepReasons = Set<String>()
+    private func setAsleep(_ reason: String, _ on: Bool) {
+        if on { sleepReasons.insert(reason) } else { sleepReasons.remove(reason) }
+        // once the user is back in their session, the screen saver is certainly over
+        if !on && (reason == "lock" || reason == "session") { sleepReasons.remove("saver") }
+        ErrorLog.debug("asleep \(reason)=\(on) -> \(sleepReasons.sorted())")
+        let s = !sleepReasons.isEmpty
         if s == asleep { return }
         asleep = s
-        if s { stopTicker() } else { lastT = CACurrentMediaTime(); startTimer() }
+        if s { finishRuns(); stopTicker() } else { lastT = CACurrentMediaTime(); startTimer() }
+    }
+
+    /// Ends Santa's trip and the plow run at once, as if they had arrived. Called when the overlay stops
+    /// (screen saver, display sleep, lock) or the frames stalled: otherwise they stay "on the way" with the jingle looping.
+    private func finishRuns() {
+        if santaActive || plow.active { ErrorLog.debug("finish runs: santa=\(santaActive) plow=\(plow.active)") }
+        if santaActive { santaActive = false; santaNext = 60 + R() * 120 }
+        sparks.removeAll()
+        if plow.active { plow.active = false; plow.cooldown = 30 }
+        audio.stopAll()
     }
 
     /// Frames follow the display's refresh (a display link), so at e.g. 20 fps on a 120 Hz screen every frame
@@ -226,6 +245,8 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     // ------------------------------------------------------------------ hovedløkke
     private func tick() {
         let now = CACurrentMediaTime()
+        // frames stopped for a while (e.g. a screen saver we got no notice of): let Santa and the plow arrive
+        if now - lastT > 2 && lastT > 0 { finishRuns() }
         let dt = F(min(0.1, now - lastT))
         lastT = now
         time += Double(dt)
@@ -336,7 +357,11 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         }
         santaDir = R() < 0.5 ? 1 : -1
         santaX = santaDir > 0 ? santaMinX - 420 * santaScale : santaMaxX + 420 * santaScale
-        santaSpeed = (190 + R() * 80) * santaScale * (santaMaxX - santaMinX > b.width * 1.5 ? 1.6 : 1)
+        // ±10 % speed per trip, and the jingle plays at the same rate (a little faster and higher, or slower and lower)
+        let pace = 0.9 + R() * 0.2
+        jingleIndex = Int.random(in: 0..<jingles.count)
+        jingles[jingleIndex].rate = Float(pace)
+        santaSpeed = 230 * pace * santaScale * (santaMaxX - santaMinX > b.width * 1.5 ? 1.6 : 1)
         santaPhase = 0
         santaActive = true
     }
@@ -376,7 +401,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
 
     // ------------------------------------------------------------------ lyd
     private let audio = AudioHub()
-    private lazy var jingle = audio.voice(Synth.jingle, loops: true)
+    /// Three tunes; each of Santa's trips picks one at random.
+    private lazy var jingles = Synth.Tune.all.map { t in audio.voice({ Synth.jingle(t) }, loops: true, varispeed: true) }
+    private var jingleIndex = 0
     private lazy var plowEngine = audio.voice(Synth.plowEngine, loops: true)
     private lazy var plowScrape = audio.voice(Synth.plowScrape, loops: true)
     private lazy var plowHorn = audio.voice(Synth.plowHorn, loops: false)
@@ -388,12 +415,12 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     /// Pans each sound with what makes it (Santa, the plow) across all screens and fades it at the edges.
     private func updateSound(_ dt: F) {
         let d = Float(dt)
-        if cfg.sound || jingle.playing {
-            let span = max(1, santaMaxX - santaMinX)
-            let margin = 330 * santaScale
-            let presence = max(0, min(1, min(santaX - (santaMinX - margin), (santaMaxX + margin) - santaX) / margin))
-            let on = santaActive && cfg.sound && !soundMuted
-            jingle.update(level: on ? Float(presence) * volume : 0, pan: Float((santaX - santaMinX) / span * 2 - 1), dt: d)
+        let span = max(1, santaMaxX - santaMinX)
+        let margin = 330 * santaScale
+        let presence = max(0, min(1, min(santaX - (santaMinX - margin), (santaMaxX + margin) - santaX) / margin))
+        let on = santaActive && cfg.sound && !soundMuted
+        for (i, v) in jingles.enumerated() where (cfg.sound && i == jingleIndex) || v.playing {
+            v.update(level: on && i == jingleIndex ? Float(presence) * volume : 0, pan: Float((santaX - santaMinX) / span * 2 - 1), dt: d)
         }
         if cfg.plowSound || plowEngine.playing || plowScrape.playing {
             let span = max(1, plow.maxX - plow.minX)

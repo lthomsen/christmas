@@ -52,14 +52,15 @@ enum JuleClock {
     }
 }
 
-/// Appends errors to ~/Library/Logs/JuleHygge.log, capped so a repeating error cannot grow it forever.
+/// Appends errors to ~/Library/Logs/JuleHygge.log (JULE_LOG overrides), capped so a repeating error cannot grow it forever.
 enum ErrorLog {
     nonisolated(unsafe) static var written = 0
 
     static func write(_ msg: String) {
         guard written < 200 else { return }
         written += 1
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/JuleHygge.log")
+        let url = ProcessInfo.processInfo.environment["JULE_LOG"].map { URL(fileURLWithPath: $0) }   // tests log inside the project
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/JuleHygge.log")
         let line = "\(JuleClock.format(Date())) \(msg)\n"
         if let h = try? FileHandle(forWritingTo: url) {
             h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()

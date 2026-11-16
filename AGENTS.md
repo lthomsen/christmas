@@ -50,4 +50,6 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
   - Vision-masken er 512×384 (4:3), mens kameraet er 1920×1080 (16:9). Stræk masken til kamerabilledet, og flyt begge med samme transformation. Beregn masken for hvert billede, ellers halter kanten.
   - `timeout` findes ikke på macOS. Kør `log stream` i baggrunden og stop den med `kill`.
 - Lyd (kun macOS) syntetiseres i `Sound.swift` — stadig ingen lydfiler. Lyd skal altid være slået fra som standard.
+- Alt, der er "på vej" (julemanden, sneploven, deres lyd), skal afsluttes i `finishRuns()`, når overlayet stopper (pauseskærm, skærmsøvn, lås). Ellers hænger turen, når timeren står stille, og melodien looper (rettet 2026-11-16).
+- Test-appen skal køre som `.app` (`build/JuleHygge.app`, ikke `.build/release/JuleHygge`), ellers crasher UserNotifications. Brug `JULE_LOG` og `JULE_SETTINGS` med stier i projektet.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.
