@@ -1,6 +1,6 @@
 # JuleHygge som baggrund i Teams — undersøgelse (2026-11-16)
 
-> **Status:** Mulighed A (virtuelt kamera) er bygget, se "JuleHygge Kamera" i `macos/README.md`. Kode, udvidelse og Xcode-projekt er klar. Signering venter på, at Mac'en registreres som enhed på teamet, og derefter mangler test i Teams.
+> **Status:** Mulighed A (virtuelt kamera) er bygget, se "JuleHygge Kamera" i `macos/README.md`. Kode, udvidelse og Xcode-projekt er klar. Det er signeret med teamets Apple Development-certifikat og testet i Photo Booth og Microsoft Teams (2026-11-16). Lyden kommer ikke med i Teams, for den spilles kun lokalt (en virtuel mikrofon er fravalgt).
 
 **Ønske:** Når et Teams-møde kører, skal juleoverlayet (sne, nisser, julemand osv.) vises som baggrund bag brugeren i Teams, som om det var en tredje skærm.
 
