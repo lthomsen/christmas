@@ -23,7 +23,12 @@ Kræver Xcode eller Command Line Tools (Swift 5.10+), macOS 14+.
 open build/JuleHygge.app
 ```
 
-Læg evt. `build/JuleHygge.app` i `/Programmer`, så "Start ved login" virker stabilt. Appen er ad-hoc-signeret; til distribution kræves Developer ID-signering og notarisering.
+Installér i `~/Applications` med start ved login (login-elementet peger på den installerede kopi, så senere builds ikke ødelægger det):
+
+```bash
+./install.sh
+```
+Appen er ad-hoc-signeret; til distribution kræves Developer ID-signering og notarisering.
 
 ## Test
 
@@ -37,6 +42,10 @@ Læg evt. `build/JuleHygge.app` i `/Programmer`, så "Start ved login" virker st
 | `JULE_DATE=yyyy-MM-dd` | lader som om det er en anden dato |
 | `JULE_SETTINGS=sti` | brug en anden settings-fil (så tests ikke ændrer de rigtige indstillinger) |
 | `JULE_DEBUG=1` | debuglinjer i fejlloggen |
+| `JULE_FPS=N` | fast billedfrekvens (til målinger) |
+| `JULE_DEEPSNOW=1` | starter med fuld snedrive (til test af sneploven) |
+| `JULE_TICKS=1` | skriver faktiske billeder/s til stderr |
+| `--login=on` / `--login=off` | slår start ved login til/fra |
 
 Eksempel (kør binæren direkte for at kunne sætte miljøvariabler):
 
@@ -54,7 +63,31 @@ JULE_SETTINGS=$PWD/build/test.ini JULE_DATE=2026-12-13 build/JuleHygge.app/Conte
 | `Sources/JuleHygge/Calendar.swift` | Julekalender-vinduet og indholdet bag lågerne |
 | `Sources/JuleHygge/Settings.swift` | Indlæsning og gemning af indstillinger |
 | `Sources/JuleHygge/Icon.swift` | Snefnug-ikonet (menulinje og app-ikon, tegnes i koden) |
+| `install.sh` / `measure.sh` | installation med start ved login / CPU-måling af app og WindowServer |
 | `Sources/JuleHygge/Util.swift` | Dato, log, dataklasser og GDI+-agtige tegnehjælpere |
 
+### Strømforbrug
+Det dyre er ikke appens egen CPU, men at **WindowServer** skal sammensætte overlayet på ny ved hver ændring. Målt med `./measure.sh` (MacBook + 2560×1440-skærm, WindowServer ~12 % uden appen):
+
+| | App | WindowServer ekstra | I alt |
+|---|---|---|---|
+| Første version (30 fps med Timer, alt gentegnet) | 27 % | ~21 % | ~48 % |
+| Billedfrekvens 12 (også strømspare) | ~5 % | ~4 % | **~9 %** |
+| Billedfrekvens 20 (standard) | ~8 % | ~10 % | **~18 %** |
+| Billedfrekvens 30 | ~11 % | ~22 % | **~33 %** |
+| Billedfrekvens 60 | ~19 % | ~36 % | **~55 %** |
+| Mens julemanden flyver (60 fps, ~10-20 s ad gangen) | ~20 % | ~40 % | ~60 % |
+| Mens sneploven kører, inkl. sne der sprøjter op (30 fps, ~25 s over to skærme) | ~15 % | ~14 % | ~29 % |
+
+Billedfrekvensen for den rolige scene vælges i menuen **Billedfrekvens** (gemmes som `FrameRate`). Strømspare bruger højst 12. Separate frekvenser pr. element ville ikke spare noget: enhver ændring får WindowServer til at sammensætte overlayet, så det er det samlede antal opdateringer pr. sekund, der koster.
+
+Valg der holder det nede:
+- **Én fælles display link** (`NSScreen.displayLink`) og én `CATransaction` pr. frame. Den følger skærmens opdatering, så billederne kommer med helt jævne mellemrum (ved 20 fps på 120 Hz præcis hver 6. opdatering). En almindelig `Timer` driver i forhold til skærmen og får sneen til at hakke. Lav frekvens når scenen er rolig (20 fps / 12 fps i strømspare), 60 fps (30 i strømspare) kun mens julemanden flyver, og 30 fps (20) mens den langsomme sneplov kører.
+- **Ingen Core Animation-animationer** (`CABasicAnimation` m.fl.): de kører altid med skærmens fulde frekvens (op til 120 Hz) og fik WindowServer op over 50 %. `preferredFrameRateRange` hjalp ikke.
+- **Nisser** tegnes ikke pr. frame: hver positur (16 gangbilleder, 8 stå, 8 vinke) tegnes én gang pr. tøjvariant og genbruges; størrelse og retning er GPU-skalering.
+- **Julelys**: ledning og slukkede pærer tegnes én gang; hver pæres lyse udgave er et færdigt billede, hvis gennemsigtighed ændres ~7 gange/s.
+- Julemand og sneplov flyttes hver frame, men gentegnes kun hver anden. Snedriven opdateres 5 gange/s.
+- Timeren stopper helt, når skærmen sover eller er låst.
+
 ### Tegning
-Hver figur (julemanden, nisser, snemand, sneplov, julelys) er et lille `CALayer`, der kun gentegnes i sin egen størrelse. Snefnug, gnister og sneklumper er genbrugte billedlag, som kun flyttes. Snedriven er et `CAShapeLayer`. Al sammensætning sker på GPU'en, så der er ingen dirty-rect-håndtering som i Windows-versionen. Tegnekoden bruger skærmkoordinater med origo øverst til venstre, så den kan sammenlignes linje for linje med `src/Layer.cs`.
+Hver figur (julemanden, nisser, snemand, sneplov, julelys) er et lille `CALayer`, der kun gentegnes i sin egen størrelse. Snefnug, gnister og sneklumper er genbrugte billedlag, som kun flyttes. Sneploven køres af `Controller` i globale koordinater, så den kører én sammenhængende tur hen over skærme, der står ved siden af hinanden (ligesom julemanden). Snedriven er et `CAShapeLayer`. Al sammensætning sker på GPU'en, så der er ingen dirty-rect-håndtering som i Windows-versionen. Tegnekoden bruger skærmkoordinater med origo øverst til venstre, så den kan sammenlignes linje for linje med `src/Layer.cs`.

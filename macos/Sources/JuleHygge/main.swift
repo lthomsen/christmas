@@ -29,6 +29,9 @@ for a in args {
         let parts = a.dropFirst(11).split(separator: ",")
         if let dir = parts.first { controller.snapshot = (String(dir), parts.count > 1 ? Double(parts[1]) ?? 5 : 5) }
     }
+    // --login=on/off turns "Start ved login" on or off (used by install.sh).
+    else if a == "--login=on" { Controller.setAutostart(true) }
+    else if a == "--login=off" { Controller.setAutostart(false) }
     else if a == "--julemand" { DispatchQueue.main.async { controller.launchSanta() } }
     else if a.hasPrefix("--effekt="), let n = Int(a.dropFirst(9)) { DispatchQueue.main.async { controller.triggerEffect(n) } }
 }

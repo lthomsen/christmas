@@ -88,6 +88,7 @@ final class Nisse {
     var x: F = 0, dir: F = 1, speed: F = 0, walkPhase: F = 0, t: F = 0, stateTimer: F = 0, size: F = 1
     var state = 0           // 0 = går, 1 = står stille, 2 = vinker
     var carriesGift = false
+    var variant = ""
     var tunic = C(115, 120, 130), mitten = C(210, 30, 40), gift = C(40, 140, 70)
 }
 

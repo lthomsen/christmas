@@ -39,4 +39,5 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Ændringer i figurer/logik bør laves i **begge** udgaver. Tegnekoden i `Overlay.swift` følger `src/Layer.cs` linje for linje (origo øverst til venstre).
 - Skærmbilleder kræver skærmoptagelsestilladelse. Brug i stedet `--snapshot=MAPPE[,SEK]`, som gemmer overlayet som PNG.
 - Brug `JULE_SETTINGS=<sti i projektet>` ved test med `JULE_DATE`, så de rigtige indstillinger ikke ændres.
+- **Strøm:** Mål med `macos/measure.sh` før og efter ændringer i tegnekoden — både app og WindowServer. Brug ikke Core Animation-animationer (de kører med 120 Hz); alt drives af den fælles timer. Se afsnittet "Strømforbrug" i `macos/README.md`.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

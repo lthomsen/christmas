@@ -15,13 +15,15 @@ final class Sprite: NSObject, CALayerDelegate {
         super.init()
         layer.delegate = self
         layer.contentsScale = scale
+        layer.contentsGravity = .topLeft
         layer.isHidden = true
         parent.addSublayer(layer)
     }
 
     /// Moves the sprite to `r` (screen coordinates, y down) and optionally redraws it.
     func place(_ r: CGRect, redraw: Bool = true) {
-        let r = r.integral
+        // Origin is rounded and size kept stable, so moving the layer without a redraw never rescales its content.
+        let r = CGRect(x: floor(r.minX), y: floor(r.minY), width: ceil(r.width) + 1, height: ceil(r.height) + 1)
         if r != rect {
             rect = r
             layer.frame = CGRect(x: r.minX, y: screenHeight - r.maxY, width: r.width, height: r.height)
@@ -135,9 +137,12 @@ final class ScreenOverlay {
     private var heap: [F]
     private let heapStep: F = 4
     private var nisser: [Nisse] = []
-    private var nisseSprites: [Sprite] = []
+    private var nisseLayers: [CALayer] = []
+    /// Pre-rendered poses, shared by every nisse with the same clothes: key = variant + state + frame.
+    private var nisseFrames: [String: CGImage] = [:]
     private var paused = false, lastPowerSave = false
-    private var lightsTimer: F = 0
+    private var frameNo = 0
+    private var groundTimer: F = 0
 
     // layers, in drawing order (back to front)
     private var lightsSprite: Sprite!, santaSprite: Sprite!, snowmanSprite: Sprite!, plowSprite: Sprite!
@@ -146,6 +151,9 @@ final class ScreenOverlay {
     private let nisseLayer = CALayer()
     private var plowBitPool: DotPool!
     private var flakePool: DotPool!
+    private var bulbLayers: [(layer: CALayer, omega: Double, phase: Double)] = []
+    private let lightsLayer = CALayer()
+    private var bulbsBuilt = false
     private var snowmanKey = ""
 
     private var PS: Bool { c.powerSave }
@@ -169,7 +177,8 @@ final class ScreenOverlay {
         S = max(0.6, H / 1080)
         let scale = screen.backingScaleFactor
         images = DotImages(scale: scale)
-        heap = Array(repeating: 0, count: Int(W / heapStep) + 2)
+        // JULE_DEEPSNOW=1 starts with a full snow pile (to test the plow throwing snow).
+        heap = Array(repeating: ProcessInfo.processInfo.environment["JULE_DEEPSNOW"] != nil ? 18 * max(0.6, frame.height / 1080) : 0, count: Int(W / heapStep) + 2)
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H), styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false
@@ -188,6 +197,9 @@ final class ScreenOverlay {
 
         let h = H
         lightsSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.renderLights(g) }
+        lightsLayer.frame = root.bounds
+        lightsLayer.isHidden = true
+        root.addSublayer(lightsLayer)
         sparkPool = DotPool(in: root, screenHeight: h)
         santaSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.drawSanta(g) }
         snowmanSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [unowned self] g in self.drawSnowman(g) }
@@ -223,16 +235,18 @@ final class ScreenOverlay {
         }
         if paused { paused = false; root.isHidden = false }
         if PS != lastPowerSave { lastPowerSave = PS; flakes.removeAll() }
+        frameNo += 1
 
         updateSnow(dt)
         updatePlow(dt)
         updateNisser(dt)
 
-        renderLightsLayer(dt)
+        renderLightsLayer()
         renderSparks()
         renderSanta()
         renderSnowman()
-        renderGround()
+        groundTimer -= dt
+        if groundTimer <= 0 { groundTimer = 0.2; renderGround() }   // the pile changes slowly
         renderNisser()
         renderPlow()
         renderSnow()
@@ -298,23 +312,6 @@ final class ScreenOverlay {
         return f
     }
 
-    private func deposit(_ x: F, _ r: F) {
-        let idx = Int(x / heapStep)
-        let amount = 0.35 * r
-        for k in -1...1 {
-            let j = idx + k
-            if j >= 0 && j < heap.count { heap[j] += k == 0 ? amount : amount * 0.5 }
-        }
-    }
-
-    private func heapAt(_ x: F) -> F {
-        let fx = x / heapStep
-        let i = Int(floor(fx))
-        if i < 0 { return heap[0] }
-        if i >= heap.count - 1 { return heap[heap.count - 1] }
-        let t = fx - F(i)
-        return heap[i] * (1 - t) + heap[i + 1] * t
-    }
 
     private func renderSnow() {
         flakePool.begin()
@@ -333,6 +330,25 @@ final class ScreenOverlay {
             }
         }
         flakePool.end()
+    }
+
+
+    private func deposit(_ x: F, _ r: F) {
+        let idx = Int(x / heapStep)
+        let amount = 0.35 * r
+        for k in -1...1 {
+            let j = idx + k
+            if j >= 0 && j < heap.count { heap[j] += k == 0 ? amount : amount * 0.5 }
+        }
+    }
+
+    private func heapAt(_ x: F) -> F {
+        let fx = x / heapStep
+        let i = Int(floor(fx))
+        if i < 0 { return heap[0] }
+        if i >= heap.count - 1 { return heap[heap.count - 1] }
+        let t = fx - F(i)
+        return heap[i] * (1 - t) + heap[i + 1] * t
     }
 
     private var groundShown = false
@@ -382,7 +398,7 @@ final class ScreenOverlay {
         let sc = c.santaScale * 1.1
         let sx = c.santaX - screenBounds.minX, sy = c.santaY - screenBounds.minY
         if sx < -330 * sc || sx > W + 330 * sc || sy < -150 * sc || sy > H + 150 * sc { santaSprite.hide(); return }
-        santaSprite.place(CGRect(x: sx - 330 * sc, y: sy - 135 * sc, width: 660 * sc, height: 195 * sc))
+        santaSprite.place(CGRect(x: sx - 330 * sc, y: sy - 135 * sc, width: 660 * sc, height: 195 * sc), redraw: frameNo % 2 == 0 || santaSprite.layer.isHidden)   // moves every frame, limbs at half rate
     }
 
     private func drawSanta(_ g: CGContext) {
@@ -554,46 +570,40 @@ final class ScreenOverlay {
     // An orange plow truck clears the snow when it gets high, alternating direction each run.
     // Snow it scrapes up builds a growing pile in front of the blade and is thrown up as chunks.
     private var plowBits: [PlowBit] = []
-    private var plowActive = false
-    private var plowX: F = 0, plowDir: F = 1, plowNextDir: F = 1, plowCooldown: F = 20, plowPushed: F = 0,
-                plowWheel: F = 0, plowSmokeTimer: F = 0, plowChunkAcc: F = 0
-    private let plowScale: F = 1.15, plowSpeed: F = 170
+    private var plowSmokeTimer: F = 0, plowChunkAcc: F = 0
+    private let plowScale: F = 1.15
 
-    private var plowPileHeight: F { min(34, 4 + sqrt(plowPushed / S) * 0.3) }
+    // The truck itself is driven by the Controller in global coordinates, so one plow drives continuously
+    // across neighbouring screens. These read its state in this screen's coordinates.
+    private var plowActive: Bool { c.plow.active && c.plow.members.contains(ObjectIdentifier(self)) }
+    private var plowX: F { c.plow.gx - screenBounds.minX }
+    private var plowDir: F { c.plow.dir }
+    private var plowWheel: F { c.plow.wheel }
+    private var plowOnScreen: Bool { plowActive && plowX > -140 * S * plowScale && plowX < W + 140 * S * plowScale }
+    private var plowPileHeight: F { min(34, 4 + sqrt(c.plow.pushed / S) * 0.3) }
 
-    func startPlow() {
-        if plowActive { return }
-        let sc = S * plowScale
-        plowActive = true
-        plowDir = plowNextDir
-        plowNextDir = -plowNextDir
-        plowX = plowDir > 0 ? -110 * sc : W + 110 * sc
-        plowPushed = 0
-        ErrorLog.debug("plow start dir=\(plowDir) W=\(W)")
-    }
+    /// True while snow chunks or smoke from the plow are still flying on this screen.
+    var isBusy: Bool { !plowBits.isEmpty }
+
+    /// Average height of the snow pile (the Controller sends the plow when it gets high).
+    var heapAverage: F { heap.reduce(0, +) / F(heap.count) }
 
     private func updatePlow(_ dt: F) {
         let sc = S * plowScale
-        if !plowActive {
-            plowCooldown -= dt
-            if cfg.plow && plowCooldown <= 0 {
-                let avg = heap.reduce(0, +) / F(heap.count)
-                if avg > 18 * S * 0.75 { startPlow() }
-            }
-        } else {
-            plowX += plowDir * plowSpeed * S * dt
-            plowWheel += plowSpeed * S * dt / (10 * sc)
-
-            // Everything between the starting edge and the blade stays scraped down to a thin layer.
+        if plowActive {
+            // Everything between the edge where the plow entered this screen and the blade stays scraped down.
             let blade = plowX + plowDir * 72 * sc
             let residue = 1.5 * S
             let from: F = plowDir > 0 ? 0 : W
-            let i0 = max(0, Int(min(from, blade) / heapStep))
-            let i1 = min(heap.count - 1, Int(max(from, blade) / heapStep))
-            if i0 <= i1 {
-                for i in i0...i1 where heap[i] > residue { plowPushed += heap[i] - residue; heap[i] = residue }
+            if (plowDir > 0 && blade > 0) || (plowDir < 0 && blade < W) {
+                let i0 = max(0, Int(max(0, min(from, blade)) / heapStep))
+                let i1 = min(heap.count - 1, Int(min(W, max(from, blade)) / heapStep))
+                if i0 <= i1 {
+                    for i in i0...i1 where heap[i] > residue { c.plow.pushed += heap[i] - residue; heap[i] = residue }
+                }
             }
-
+        }
+        if plowOnScreen {
             let gy = groundY - heapAt(plowX) + S
             let ph = plowPileHeight
             if ph > 10 {
@@ -623,15 +633,8 @@ final class ScreenOverlay {
                 b.size = 5 * S
                 plowBits.append(b)
             }
-
             // Nisser wave at the truck as it passes.
             for n in nisser where n.state != 2 && abs(n.x - plowX) < 140 * S { n.state = 2; n.stateTimer = 1.5 }
-
-            if (plowDir > 0 && plowX > W + 260 * sc) || (plowDir < 0 && plowX < -260 * sc) {
-                plowActive = false
-                plowCooldown = 30
-                ErrorLog.debug("plow done")
-            }
         }
 
         var i = plowBits.count - 1
@@ -653,10 +656,10 @@ final class ScreenOverlay {
                             opacity: b.smoke ? 90 / 255 * b.life / b.max : 235 / 255)
         }
         plowBitPool.end()
-        guard plowActive else { plowSprite.hide(); return }
+        guard plowOnScreen else { plowSprite.hide(); return }
         let sc = S * plowScale
         let gy = groundY - heapAt(plowX) + S
-        plowSprite.place(CGRect(x: plowX - 130 * sc, y: gy - 100 * sc, width: 260 * sc, height: 106 * sc))
+        plowSprite.place(CGRect(x: plowX - 130 * sc, y: gy - 100 * sc, width: 260 * sc, height: 106 * sc), redraw: frameNo % 2 == 0 || plowSprite.layer.isHidden)
     }
 
     private func drawPlow(_ g: CGContext) {
@@ -745,18 +748,20 @@ final class ScreenOverlay {
             n.tunic = Self.tunics[ti]
             n.mitten = ti == 2 ? C(40, 105, 65) : Self.hatRed   // red tunic gets green mittens
             n.carriesGift = R() < 0.4
-            n.gift = Self.gifts.randomElement()!
+            let gi = Int.random(in: 0..<Self.gifts.count)
+            n.gift = Self.gifts[gi]
+            n.variant = "\(ti)-\(n.carriesGift ? gi : -1)"
             n.stateTimer = 3 + R() * 6
             n.t = R() * 10
             nisser.append(n)
-            let sprite = Sprite(parent: nisseLayer, screenHeight: H, scale: window.backingScaleFactor) { [unowned self, unowned n] g in
-                self.drawNisse(g, n)
-            }
-            nisseSprites.append(sprite)
+            let l = CALayer()
+            l.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "transform": NSNull(), "hidden": NSNull()]
+            nisseLayer.addSublayer(l)
+            nisseLayers.append(l)
         }
         while nisser.count > target {
             nisser.removeLast()
-            nisseSprites.removeLast().layer.removeFromSuperlayer()
+            nisseLayers.removeLast().removeFromSuperlayer()
         }
 
         for n in nisser {
@@ -783,22 +788,46 @@ final class ScreenOverlay {
         }
     }
 
+    // Frames per cycle: walking (legs + hat sway, period 4π of the walk phase), standing (hat sway), waving (arm).
+    private static let walkFrames = 16, standFrames = 8, waveFrames = 8
+
     private func renderNisser() {
         for (i, n) in nisser.enumerated() {
             let sc = S * n.size
             let gy = groundY - heapAt(n.x) + 2 * S
-            nisseSprites[i].place(CGRect(x: n.x - 32 * sc, y: gy - 72 * sc, width: 64 * sc, height: 80 * sc))
+            let frame: Int
+            switch n.state {
+            case 0: frame = Int((n.walkPhase / (4 * .pi)).truncatingRemainder(dividingBy: 1) * F(Self.walkFrames)) % Self.walkFrames
+            case 1: frame = Int((n.t * 1.5 / (2 * .pi)).truncatingRemainder(dividingBy: 1) * F(Self.standFrames)) % Self.standFrames
+            default: frame = Int((n.t * 11 / (2 * .pi)).truncatingRemainder(dividingBy: 1) * F(Self.waveFrames)) % Self.waveFrames
+            }
+            let key = "\(n.variant)-\(n.state)-\(frame)"
+            let img = nisseFrames[key] ?? renderNisseFrame(n, frame, key)
+            let l = nisseLayers[i]
+            if l.contents == nil || (l.contents as! CGImage) !== img { l.contents = img }
+            l.bounds = CGRect(x: 0, y: 0, width: 64 * sc, height: 80 * sc)
+            l.position = CGPoint(x: n.x, y: H - (gy - 32 * sc))
+            l.setAffineTransform(CGAffineTransform(scaleX: n.dir, y: 1))
         }
     }
 
-    private func drawNisse(_ g: CGContext, _ n: Nisse) {
-        let sc = S * n.size
-        let gy = groundY - heapAt(n.x) + 2 * S
-        g.translateBy(x: n.x, y: gy)
-        g.scaleBy(x: n.dir * sc, y: sc)
+    /// Draws one pose at the largest nisse size; smaller nisser and the walking direction are GPU scaling.
+    private func renderNisseFrame(_ n: Nisse, _ frame: Int, _ key: String) -> CGImage {
+        let maxSc = S * 1.15
+        let img = renderImage(width: 64 * maxSc, height: 80 * maxSc, scale: window.backingScaleFactor) { g in
+            g.scaleBy(x: maxSc, y: maxSc)
+            g.translateBy(x: 32, y: 72)
+            drawNisse(g, n, frame)
+        }!
+        nisseFrames[key] = img
+        return img
+    }
 
+    private func drawNisse(_ g: CGContext, _ n: Nisse, _ frame: Int) {
+        let p: F = n.state == 0 ? F(frame) / F(Self.walkFrames) * 4 * .pi : 0
+        let standPhase: F = n.state == 1 ? F(frame) / F(Self.standFrames) * 2 * .pi : 0
+        let wavePhase: F = n.state == 2 ? F(frame) / F(Self.waveFrames) * 2 * .pi : 0
         let walking = n.state == 0
-        let p = n.walkPhase
         let legA: F = walking ? sin(p) * 0.55 : 0
         let bob: F = walking ? -abs(sin(p)) * 1.5 : 0
 
@@ -814,7 +843,7 @@ final class ScreenOverlay {
 
         g.translateBy(x: 0, y: bob)
         let backArm: F, frontArm: F
-        if n.state == 2 { backArm = -legA * 0.8; frontArm = 2.5 + sin(n.t * 11) * 0.45 }
+        if n.state == 2 { backArm = -legA * 0.8; frontArm = 2.5 + sin(wavePhase) * 0.45 }
         else if n.carriesGift { backArm = 1.3; frontArm = 1.3 }
         else { backArm = -legA * 0.9; frontArm = legA * 0.9 }
 
@@ -846,7 +875,7 @@ final class ScreenOverlay {
         arm(1, -29, frontArm)
         g.fillEllipse(C(240, 160, 150), 4, -40, 5, 5)
 
-        let sway = sin(walking ? p * 0.5 : n.t * 1.5) * 2.5
+        let sway = sin(walking ? p * 0.5 : standPhase) * 2.5
         let tipX = -14 + sway, tipY: F = -57
         let hat = CGMutablePath()
         hat.start(-7.5, -39)
@@ -862,18 +891,62 @@ final class ScreenOverlay {
     // ------------------------------------------------------------------ julelys
     static let bulbColors = [C(255, 60, 60), C(60, 220, 90), C(255, 200, 60), C(80, 150, 255), C(255, 110, 200)]
 
-    private func renderLightsLayer(_ dt: F) {
-        guard cfg.lights else { lightsSprite.hide(); return }
-        lightsTimer -= dt
-        let redraw = lightsTimer <= 0 || lightsSprite.layer.isHidden
-        if redraw { lightsTimer = PS ? 0.25 : 0.1 }   // the twinkle is slow, so 4 updates/s is enough in power-save mode
-        lightsSprite.place(CGRect(x: 0, y: lightsTop, width: W, height: lightsHeight), redraw: redraw)
+    // The wire, sockets and dimmed bulbs are drawn once. Each bulb's bright version (glow, colour, shine)
+    // is a separate layer whose opacity twinkles via a Core Animation loop, so the twinkle costs no CPU.
+    private func renderLightsLayer() {
+        guard cfg.lights else { lightsSprite.hide(); lightsLayer.isHidden = true; return }
+        if lightsSprite.layer.isHidden { lightsSprite.place(CGRect(x: 0, y: lightsTop, width: W, height: lightsHeight)) }
+        if !bulbsBuilt { buildBulbs(); bulbsBuilt = true }
+        lightsLayer.isHidden = false
+        // The twinkle is slow, so 10 updates/s (5 in power-save mode) is plenty.
+        lightsTimer -= 1
+        if lightsTimer <= 0 {
+            lightsTimer = PS ? 3 : 3
+            for b in bulbLayers {
+                // brightness 0.55 + 0.45·sin(ω·t + φ), as in the Windows version (0.1…1 over the dimmed bulb)
+                b.layer.opacity = Float(0.55 + 0.45 * sin(c.time * b.omega + b.phase))
+            }
+        }
+    }
+    private var lightsTimer = 0
+
+    private func forEachBulb(_ body: (_ idx: Int, _ bx: F, _ by: F) -> Void) {
+        let span = 230 * S, sag = 22 * S, top = lightsTop + 1
+        var idx = 0
+        var x0 = -span * 0.3
+        while x0 < W {
+            for b in 0..<4 {
+                let u = (F(b) + 0.5) / 4
+                body(idx, x0 + u * span, top + sag * (1 - (2 * u - 1) * (2 * u - 1)))
+                idx += 1
+            }
+            x0 += span
+        }
+    }
+
+    private func buildBulbs() {
+        let scale = window.backingScaleFactor
+        let w = 7 * S, h = 11 * S, bw = 26 * S, bh = 28 * S
+        let bright = Self.bulbColors.map { col in
+            renderImage(width: bw, height: bh, scale: scale) { g in
+                g.fillEllipse(withAlpha(col, 70), 0, 1 * S, 26 * S, 26 * S)
+                g.fillEllipse(col, bw / 2 - w / 2, 3 * S, w, h)
+                g.fillEllipse(C(255, 255, 255, 160), bw / 2 - w / 4, 5 * S, w / 3, h / 3)
+            }
+        }
+        forEachBulb { idx, bx, by in
+            let l = CALayer()
+            l.contents = bright[idx % bright.count]
+            l.contentsScale = scale
+            l.frame = CGRect(x: bx - 13 * S, y: H - (by + bh), width: bw, height: bh)
+            l.actions = ["opacity": NSNull()]
+            bulbLayers.append((l, 1.3 + Double(idx * 37 % 10) * 0.12, Double(idx) * 1.7))
+            lightsLayer.addSublayer(l)
+        }
     }
 
     private func renderLights(_ g: CGContext) {
         let span = 230 * S, sag = 22 * S, top = lightsTop + 1
-        let perSpan = 4
-        var idx = 0
         let wire = C(25, 60, 35, 220), socket = C(30, 70, 40)
         var x0 = -span * 0.3
         while x0 < W {
@@ -885,22 +958,13 @@ final class ScreenOverlay {
                 if k == 0 { g.move(to: p) } else { g.addLine(to: p) }
             }
             g.strokePath()
-
-            for b in 0..<perSpan {
-                let u = (F(b) + 0.5) / F(perSpan)
-                let bx = x0 + u * span, by = top + sag * (1 - (2 * u - 1) * (2 * u - 1))
-                let col = Self.bulbColors[idx % Self.bulbColors.count]
-                let comps = col.components!
-                let br = 0.55 + 0.45 * F(sin(c.time * (1.3 + Double(idx * 37 % 10) * 0.12) + Double(idx) * 1.7))
-                let w = 7 * S, h = 11 * S
-                g.fillEllipse(withAlpha(col, Int(70 * br)), bx - 13 * S, by + 1 * S, 26 * S, 26 * S)
-                g.fillRect(socket, bx - 2.5 * S, by, 5 * S, 4 * S)
-                let f = 0.5 + 0.5 * br
-                g.fillEllipse(CGColor(srgbRed: comps[0] * f, green: comps[1] * f, blue: comps[2] * f, alpha: 1), bx - w / 2, by + 3 * S, w, h)
-                g.fillEllipse(C(255, 255, 255, Int(160 * br)), bx - w / 4, by + 5 * S, w / 3, h / 3)
-                idx += 1
-            }
             x0 += span
+        }
+        let w = 7 * S, h = 11 * S
+        forEachBulb { idx, bx, by in
+            let comps = Self.bulbColors[idx % Self.bulbColors.count].components!
+            g.fillRect(socket, bx - 2.5 * S, by, 5 * S, 4 * S)
+            g.fillEllipse(CGColor(srgbRed: comps[0] * 0.5, green: comps[1] * 0.5, blue: comps[2] * 0.5, alpha: 1), bx - w / 2, by + 3 * S, w, h)
         }
     }
 }

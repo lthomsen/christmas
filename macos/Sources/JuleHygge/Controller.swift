@@ -27,7 +27,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         "knapper", "arme af grene", "et smil", "et rødt halstørklæde", "en høj hat", "en kost - snemanden er færdig!"]
 
     private var overlays: [ScreenOverlay] = []
-    private var timer: Timer?
+    private var link: CADisplayLink?
+    private var lastTick: CFTimeInterval = 0
+    private var tickCount = 0, tickWindow: CFTimeInterval = 0
     private var lastT = CACurrentMediaTime()
     private var windTarget: F = 0, windTimer: F = 0, santaNext: F = 5, sparkAcc: F = 0, fsTimer: F = 0, topTimer: F = 0, dayTimer: F = 0
     private var powerTimer: F = 0
@@ -56,15 +58,68 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.buildOverlays()
         }
+        // Stop completely while the displays sleep, the screen is locked or another user is active.
+        let ws = NSWorkspace.shared.notificationCenter
+        for (name, sleeping) in [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false),
+                                 (NSWorkspace.sessionDidResignActiveNotification, true), (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.setAsleep(sleeping) }
+        }
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.setAsleep(true) }
+        dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in self?.setAsleep(false) }
         updatePowerSave()
         startTimer()
     }
 
+    private var asleep = false
+    private var currentFps: Double = 0
+
+    /// Every screen update makes WindowServer recomposite the overlay, which is what really costs power.
+    /// So the calm scene runs at a low frame rate, and only fast things (Santa, the plow, sparks) get a smooth 60 fps.
+    private var desiredFps: Double {
+        if let f = Double(ProcessInfo.processInfo.environment["JULE_FPS"] ?? "") { return f }
+        let calm = Double(powerSave ? min(cfg.frameRate, 12) : cfg.frameRate)
+        // Santa (and his sparks/star showers) moves fast and needs 60 fps to look fluent.
+        if santaActive || !sparks.isEmpty { return max(calm, powerSave ? 30 : 60) }
+        // The plow is slow (~175 pt/s), so 30 fps is smooth enough and costs about half as much.
+        if plow.active || overlays.contains(where: { $0.isBusy }) { return max(calm, powerSave ? 20 : 30) }
+        return calm
+    }
+    private func setAsleep(_ s: Bool) {
+        if s == asleep { return }
+        asleep = s
+        if s { stopTicker() } else { lastT = CACurrentMediaTime(); startTimer() }
+    }
+
+    /// Frames follow the display's refresh (a display link), so at e.g. 20 fps on a 120 Hz screen every frame
+    /// lands exactly 6 refreshes apart. A plain Timer drifts against the refresh and makes motion judder.
     private func startTimer() {
-        timer?.invalidate()
-        let t = Timer(timeInterval: powerSave ? 1.0 / 20 : 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
-        RunLoop.main.add(t, forMode: .common)   // keeps running while the menu is open
-        timer = t
+        stopTicker()
+        let fps = desiredFps
+        currentFps = fps
+        guard let screen = NSScreen.screens.first else { return }
+        let l = screen.displayLink(target: self, selector: #selector(linkFired(_:)))
+        let f = Float(fps)
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: f, maximum: f, preferred: f)
+        l.add(to: .main, forMode: .common)   // keeps running while the menu is open
+        link = l
+    }
+
+    private func stopTicker() { link?.invalidate(); link = nil }
+
+    @objc private func linkFired(_ l: CADisplayLink) {
+        // Safety net in case the system delivers more callbacks than asked for: skip early ones.
+        let now = CACurrentMediaTime()
+        if now - lastTick < 1 / currentFps - 0.004 { return }
+        lastTick = now
+        if ProcessInfo.processInfo.environment["JULE_TICKS"] != nil {
+            tickCount += 1
+            if now - tickWindow >= 5 {
+                FileHandle.standardError.write("ticks/s: \(Double(tickCount) / (now - tickWindow))\n".data(using: .utf8)!)
+                tickCount = 0; tickWindow = now
+            }
+        }
+        tick()
     }
 
     private func updatePowerSave() {
@@ -75,7 +130,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         }
         let low = ProcessInfo.processInfo.isLowPowerModeEnabled
         let ps = cfg.powerSave == 1 || (cfg.powerSave == 2 && (onBattery || low))
-        if ps != powerSave { powerSave = ps; if timer != nil { startTimer() } }
+        if ps != powerSave { powerSave = ps; if link != nil && !asleep { startTimer() } }
     }
 
     // ------------------------------------------------------------------ skærme
@@ -87,6 +142,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             overlays.append(ScreenOverlay(controller: self, screen: s))
         }
         santaActive = false
+        plow.active = false
     }
 
     // ------------------------------------------------------------------ hovedløkke
@@ -111,6 +167,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         updateWind(dt)
         updateSanta(dt)
         updateSparks(dt)
+        updatePlow(dt)
         if celebrateAt > 0 && time >= celebrateAt { celebrateAt = -1; snowmanCelebrate() }
         if plowAt >= 0 && time >= plowAt { plowAt = -1; sendPlow() }
 
@@ -118,6 +175,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         CATransaction.setDisableActions(true)
         for o in overlays { o.frame(dt) }
         CATransaction.commit()
+        if desiredFps != currentFps && !asleep { startTimer() }
         if let s = snapshot, time >= s.at { snapshot = nil; writeSnapshots(to: s.dir) }
     }
 
@@ -132,7 +190,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { continue }
             ctx.setFillColor(C(40, 55, 80)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-            o.root.render(in: ctx)
+            (o.root.presentation() ?? o.root).render(in: ctx)
             if let img = ctx.makeImage() {
                 try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?
                     .write(to: URL(fileURLWithPath: dir).appendingPathComponent("screen\(i).png"))
@@ -245,7 +303,65 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         }
     }
 
-    func sendPlow() { for o in overlays { o.startPlow() } }
+    // ------------------------------------------------------------------ sneplov
+    /// One plow run in global coordinates, driving continuously across side-by-side screens (like Santa).
+    final class PlowRun {
+        var active = false
+        var gx: F = 0, dir: F = 1, nextDir: F = 1, wheel: F = 0, pushed: F = 0, cooldown: F = 20
+        var minX: F = 0, maxX: F = 0
+        var members = Set<ObjectIdentifier>()
+    }
+    let plow = PlowRun()
+    private let plowSpeed: F = 170, plowScale: F = 1.15
+
+    /// Sends the plow out now (menu, --sneplov), starting from the main screen's row of screens.
+    func sendPlow() {
+        if let o = overlays.first(where: { $0.isPrimary }) ?? overlays.first { startPlow(from: o) }
+    }
+
+    private func startPlow(from start: ScreenOverlay) {
+        if plow.active { return }
+        // all screens joined edge to edge with the starting screen, left and right
+        var row = [start]
+        var grew = true
+        while grew {
+            grew = false
+            let lo = row.map { $0.screenBounds.minX }.min()!, hi = row.map { $0.screenBounds.maxX }.max()!
+            for o in overlays where !row.contains(where: { $0 === o }) {
+                let b = o.screenBounds
+                if abs(b.maxX - lo) < 2 || abs(b.minX - hi) < 2 { row.append(o); grew = true }
+            }
+        }
+        plow.minX = row.map { $0.screenBounds.minX }.min()!
+        plow.maxX = row.map { $0.screenBounds.maxX }.max()!
+        plow.members = Set(row.map { ObjectIdentifier($0) })
+        plow.dir = plow.nextDir
+        plow.nextDir = -plow.nextDir
+        let sc = start.S * plowScale
+        plow.gx = plow.dir > 0 ? plow.minX - 110 * sc : plow.maxX + 110 * sc
+        plow.pushed = 0
+        plow.active = true
+        ErrorLog.debug("plow start dir=\(plow.dir) from \(plow.minX) to \(plow.maxX)")
+    }
+
+    private func updatePlow(_ dt: F) {
+        if !plow.active {
+            plow.cooldown -= dt
+            if cfg.plow && plow.cooldown <= 0, let o = overlays.first(where: { $0.heapAverage > 18 * $0.S * 0.75 }) { startPlow(from: o) }
+            return
+        }
+        // speed and size follow the screen the truck is on
+        let here = overlays.first { plow.members.contains(ObjectIdentifier($0)) && plow.gx >= $0.screenBounds.minX && plow.gx < $0.screenBounds.maxX }
+            ?? overlays.first { plow.members.contains(ObjectIdentifier($0)) }
+        let s = here?.S ?? 1
+        plow.gx += plow.dir * plowSpeed * s * dt
+        plow.wheel += plowSpeed * s * dt / (10 * s * plowScale)
+        if (plow.dir > 0 && plow.gx > plow.maxX + 260 * s * plowScale) || (plow.dir < 0 && plow.gx < plow.minX - 260 * s * plowScale) {
+            plow.active = false
+            plow.cooldown = 30
+            ErrorLog.debug("plow done")
+        }
+    }
 
     func sendPlowAfter(_ seconds: Double) { plowAt = time + (seconds > 0 ? seconds : 0) }
 
@@ -387,6 +503,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(choice("Strømspare",
                             ["Fra - fuld sne på hele skærmen", "Til - sne kun nederst, stille blæser", "Kun på batteri eller i strømsparetilstand"],
                             [0, 1, 2], { $0.powerSave }, { [unowned self] in $0.powerSave = $1; updatePowerSave() }))
+        menu.addItem(choice("Billedfrekvens",
+                            ["12 billeder/s - mindst strøm", "20 billeder/s - normal", "30 billeder/s - glattere sne", "60 billeder/s - helt glat, mest strøm"],
+                            [12, 20, 30, 60], { $0.frameRate }, { [unowned self] in $0.frameRate = $1; startTimer() }))
         menu.addItem(toggle("Julelys", { $0.lights }, { $0.lights = $1 }))
         menu.addItem(toggle("Vis på alle skærme", { $0.allScreens }, { [unowned self] in $0.allScreens = $1; buildOverlays() }))
         menu.addItem(toggle("Pause ved fuldskærm (spil/film)", { $0.pauseFullscreen }, { $0.pauseFullscreen = $1 }))
@@ -444,7 +563,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     private func exit() {
-        timer?.invalidate()
+        stopTicker()
         calendarWindow?.close()
         for o in overlays { o.close() }
         overlays.removeAll()
