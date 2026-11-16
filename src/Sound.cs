@@ -6,8 +6,8 @@ using System.Threading;
 
 namespace JuleHygge
 {
-    // Synthesized sound effects (the project has no sound files): Santa's sleigh bells with the
-    // "Jingle Bells" chorus (James Lord Pierpont, 1857, public domain), and the snow plow's engine,
+    // Synthesized sound effects (the project has no sound files): Santa's sleigh bells with one of three
+    // public-domain tunes (see Synth.Tune), and the snow plow's engine,
     // scraping and horn. Ported from macos/Sources/JuleHygge/Sound.swift.
     //
     // Playback uses the waveOut API that ships with Windows. Mixing runs on a background thread that only
@@ -167,10 +167,14 @@ namespace JuleHygge
         readonly bool loops;
         volatile float[] samples;
         int generating;
-        int pos;
+        double pos;   // fractional, so the voice can play faster or slower than recorded
         float gain, pan, appliedGain, appliedPan;
+        volatile float rate = 1;
 
         public bool Playing { get; private set; }
+
+        // Playback speed, tempo and pitch together (like a tape): Santa's tune follows his pace.
+        public float Rate { get { return rate; } set { rate = Math.Max(0.5f, Math.Min(2f, value)); } }
 
         internal Voice(AudioHub hub, Func<float[]> make, bool loops) { this.hub = hub; this.make = make; this.loops = loops; }
 
@@ -229,17 +233,23 @@ namespace JuleHygge
             var s = samples;
             if (!Playing || s == null || s.Length == 0) return;
             float g0 = appliedGain, g1 = gain, p0 = appliedPan, p1 = pan;
+            double step = rate;
             for (int i = 0; i < frames; i++)
             {
                 float t = (float)i / frames;
                 float g = g0 + (g1 - g0) * t;
                 double a = ((p0 + (p1 - p0) * t) + 1) * Math.PI / 4;
-                float v = s[pos] * g;
+                // linear interpolation between neighbouring samples (wrapping at the loop seam)
+                int i0 = (int)pos;
+                int i1 = i0 + 1 < s.Length ? i0 + 1 : (loops ? 0 : i0);
+                float frac = (float)(pos - i0);
+                float v = (s[i0] + (s[i1] - s[i0]) * frac) * g;
                 acc[2 * i] += v * (float)Math.Cos(a);
                 acc[2 * i + 1] += v * (float)Math.Sin(a);
-                if (++pos >= s.Length)
+                pos += step;
+                if (pos >= s.Length)
                 {
-                    if (loops) pos = 0;
+                    if (loops) pos -= s.Length;
                     else { Playing = false; break; }
                 }
             }
@@ -336,19 +346,80 @@ namespace JuleHygge
             });
         }
 
-        // One loop: the chorus played on a music-box/celesta-like tone over shaken sleigh bells.
-        public static float[] Jingle()
+        // A tune for Santa's sleigh: melody as (MIDI note, beats; 0 = rest), one bass root per bar (MIDI).
+        // All three are public domain: "Jingle Bells" (James Lord Pierpont, 1857), "Deck the Halls" (Welsh
+        // traditional) and "We Wish You a Merry Christmas" (English traditional). Same as macOS Sound.swift.
+        public sealed class Tune
         {
-            const double beat = 0.36;   // seconds per quarter note (~167 bpm)
-            const int E5 = 76, F5 = 77, G5 = 79, C5 = 72, D5 = 74;
-            // (MIDI note, length in beats); 0 = rest
-            double[,] melody = {
-                {E5,1},{E5,1},{E5,2}, {E5,1},{E5,1},{E5,2}, {E5,1},{G5,1},{C5,1.5},{D5,0.5}, {E5,4},
-                {F5,1},{F5,1},{F5,1.5},{F5,0.5}, {F5,1},{E5,1},{E5,1},{E5,0.5},{E5,0.5}, {E5,1},{D5,1},{D5,1},{E5,1}, {D5,2},{G5,2},
-                {E5,1},{E5,1},{E5,2}, {E5,1},{E5,1},{E5,2}, {E5,1},{G5,1},{C5,1.5},{D5,0.5}, {E5,4},
-                {F5,1},{F5,1},{F5,1.5},{F5,0.5}, {F5,1},{E5,1},{E5,1},{E5,0.5},{E5,0.5}, {G5,1},{G5,1},{F5,1},{D5,1}, {C5,3},{0,1} };
-            // simple bass on the beat: root notes, two octaves lower
-            int[] bassPerBar = { C5, C5, C5, C5, F5, C5, D5, G5, C5, C5, C5, C5, F5, C5, G5, C5 };
+            public string Name;
+            public double Beat;          // seconds per beat
+            public int BeatsPerBar;
+            public double[,] Melody;
+            public int[] BassRoots;
+
+            public static readonly Tune[] All = { JingleBells(), DeckTheHalls(), WeWishYou() };
+
+            static Tune JingleBells()
+            {
+                const int E5 = 76, F5 = 77, G5 = 79, C5 = 72, D5 = 74;
+                var t = new Tune { Name = "jingle-bells", Beat = 0.36, BeatsPerBar = 4 };
+                t.Melody = new double[,] {
+                    {E5,1},{E5,1},{E5,2}, {E5,1},{E5,1},{E5,2}, {E5,1},{G5,1},{C5,1.5},{D5,0.5}, {E5,4},
+                    {F5,1},{F5,1},{F5,1.5},{F5,0.5}, {F5,1},{E5,1},{E5,1},{E5,0.5},{E5,0.5}, {E5,1},{D5,1},{D5,1},{E5,1}, {D5,2},{G5,2},
+                    {E5,1},{E5,1},{E5,2}, {E5,1},{E5,1},{E5,2}, {E5,1},{G5,1},{C5,1.5},{D5,0.5}, {E5,4},
+                    {F5,1},{F5,1},{F5,1.5},{F5,0.5}, {F5,1},{E5,1},{E5,1},{E5,0.5},{E5,0.5}, {G5,1},{G5,1},{F5,1},{D5,1}, {C5,3},{0,1} };
+                t.BassRoots = new[] { C5, C5, C5, C5, F5, C5, D5, G5, C5, C5, C5, C5, F5, C5, G5, C5 };
+                for (int i = 0; i < t.BassRoots.Length; i++) t.BassRoots[i] -= 24;
+                return t;
+            }
+
+            // "Deck the Halls", whole verse with its "fa la la" lines, in C.
+            static Tune DeckTheHalls()
+            {
+                const int B4 = 71, C5 = 72, D5 = 74, E5 = 76, F5 = 77, Fs5 = 78, G5 = 79, A5 = 81, B5 = 83, C6 = 84;
+                double[,] line1 = { {G5,1.5},{F5,0.5},{E5,1},{D5,1}, {C5,1},{D5,1},{E5,1},{C5,1},
+                                    {D5,0.5},{E5,0.5},{F5,0.5},{D5,0.5},{E5,1.5},{D5,0.5}, {C5,1},{B4,1},{C5,2} };
+                double[,] line3 = { {D5,1.5},{E5,0.5},{F5,1},{D5,1}, {E5,1.5},{F5,0.5},{G5,1},{D5,1},
+                                    {E5,0.5},{Fs5,0.5},{G5,1},{A5,0.5},{B5,0.5},{C6,1}, {B5,1},{A5,1},{G5,2} };
+                double[,] line4 = { {G5,1.5},{F5,0.5},{E5,1},{D5,1}, {C5,1},{D5,1},{E5,1},{C5,1},
+                                    {A5,0.5},{A5,0.5},{A5,0.5},{A5,0.5},{G5,1.5},{F5,0.5}, {E5,1},{D5,1},{C5,2} };
+                const int C = 48, F = 53, G = 55, D = 50;
+                return new Tune { Name = "deck-the-halls", Beat = 0.34, BeatsPerBar = 4,
+                    Melody = Concat(line1, line1, line3, line4),
+                    BassRoots = new[] { C, C, G, C, C, C, G, C, G, C, D, G, C, C, F, C } };
+            }
+
+            // "We Wish You a Merry Christmas" in 3/4, in C. The pickup note sits at the end of the loop.
+            static Tune WeWishYou()
+            {
+                const int G4 = 67, A4 = 69, B4 = 71, C5 = 72, D5 = 74, E5 = 76, F5 = 77;
+                const int C = 48, F = 53, G = 55, D = 50, E = 52, A = 45;
+                return new Tune { Name = "we-wish-you", Beat = 0.4, BeatsPerBar = 3,
+                    Melody = new double[,] {
+                        {C5,1},{C5,0.5},{D5,0.5},{C5,0.5},{B4,0.5}, {A4,1},{A4,1},{A4,1},
+                        {D5,1},{D5,0.5},{E5,0.5},{D5,0.5},{C5,0.5}, {B4,1},{G4,1},{G4,1},
+                        {E5,1},{E5,0.5},{F5,0.5},{E5,0.5},{D5,0.5}, {C5,1},{A4,1},{G4,0.5},{G4,0.5},
+                        {A4,1},{D5,1},{B4,1}, {C5,2},{G4,1} },   // "year" + the pickup "We" of the next round
+                    BassRoots = new[] { C, F, D, G, E, A, F, C } };
+            }
+
+            static double[,] Concat(params double[][,] parts)
+            {
+                int n = 0;
+                foreach (var p in parts) n += p.GetLength(0);
+                var all = new double[n, 2];
+                int k = 0;
+                foreach (var p in parts)
+                    for (int i = 0; i < p.GetLength(0); i++, k++) { all[k, 0] = p[i, 0]; all[k, 1] = p[i, 1]; }
+                return all;
+            }
+        }
+
+        // One loop of a tune: the melody on a music-box/celesta-like tone, a soft bass and shaken sleigh bells.
+        public static float[] Jingle(Tune tune)
+        {
+            double beat = tune.Beat;
+            double[,] melody = tune.Melody;
 
             double totalBeats = 0;
             for (int i = 0; i < melody.GetLength(0); i++) totalBeats += melody[i, 1];
@@ -409,12 +480,15 @@ namespace JuleHygge
                 if (note > 0) addBell(time, note, melody[i, 1] * beat, 0.22);
                 time += melody[i, 1] * beat;
             }
-            int bars = (int)(totalBeats / 4);
+            // bass: the root on the first beat of each bar and the fifth on the third
+            int bpb = tune.BeatsPerBar;
+            int bars = (int)(totalBeats / bpb);
             for (int b = 0; b < bars; b++)
             {
-                int root = bassPerBar[b % bassPerBar.Length] - 24;
-                addBass(b * 4 * beat, root, beat * 1.8);
-                addBass((b * 4 + 2) * beat, root + 7, beat * 1.8);
+                int root = tune.BassRoots[b % tune.BassRoots.Length];
+                double t0 = b * bpb;
+                addBass(t0 * beat, root, beat * 1.8);
+                addBass((t0 + 2) * beat, root + 7, beat * (bpb - 2 + 0.8));
             }
             // sleigh bells: a shake on every eighth note, accented on the beat, each shake a few bells
             for (int e = 0; e * 0.5 < totalBeats; e++)
@@ -435,8 +509,11 @@ namespace JuleHygge
         {
             Directory.CreateDirectory(dir);
             var summary = new List<string>();
-            var sounds = new Dictionary<string, Func<float[]>> {
-                { "julemand-jingle", Jingle }, { "sneplov-motor", PlowEngine }, { "sneplov-skraben", PlowScrape }, { "sneplov-horn", PlowHorn } };
+            var sounds = new Dictionary<string, Func<float[]>>();
+            foreach (var t in Tune.All) { var tune = t; sounds.Add("julemand-" + tune.Name, () => Jingle(tune)); }
+            sounds.Add("sneplov-motor", PlowEngine);
+            sounds.Add("sneplov-skraben", PlowScrape);
+            sounds.Add("sneplov-horn", PlowHorn);
             foreach (var kv in sounds)
             {
                 var s = kv.Value();

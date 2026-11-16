@@ -9,7 +9,7 @@ namespace JuleHygge
     class Settings
     {
         public bool Snow = true, SnowGround = true, Santa = true, Nisser = true, Lights = true,
-                    PauseFullscreen = true, Snowman = true, AllScreens = true, Plow = true;
+                    PauseFullscreen = true, Snowman = true, AllScreens = true, Plow = true, WindowSnow = true;
         public bool Sound = false, PlowSound = false;   // sound is always off by default
         public int SnowLevel = 1;          // 0 = let, 1 = normal, 2 = snestorm
         public int NisseCount = 3;         // pr. skærm
@@ -67,6 +67,7 @@ namespace JuleHygge
             s.Snowman = B(d, "Snowman", s.Snowman);
             s.AllScreens = B(d, "AllScreens", s.AllScreens);
             s.Plow = B(d, "Plow", s.Plow);
+            s.WindowSnow = B(d, "WindowSnow", s.WindowSnow);
             s.Sound = B(d, "Sound", s.Sound);
             s.PlowSound = B(d, "PlowSound", s.PlowSound);
             s.SoundLevel = Math.Max(0, Math.Min(2, I(d, "SoundLevel", s.SoundLevel)));
@@ -102,7 +103,7 @@ namespace JuleHygge
                 File.WriteAllLines(tmp, new[] {
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
-                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow), "Sound=" + B(Sound), "PlowSound=" + B(PlowSound), "SoundLevel=" + SoundLevel,
+                    "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow), "WindowSnow=" + B(WindowSnow), "Sound=" + B(Sound), "PlowSound=" + B(PlowSound), "SoundLevel=" + SoundLevel,
                     "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave, "FrameRate=" + FrameRate,
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),

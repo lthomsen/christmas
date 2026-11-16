@@ -158,6 +158,8 @@ namespace JuleHygge
         public float X, Y, R, Vy, Phase, Sway, SwaySpd, Rot, RotSpd;
         public int A;
         public bool Crystal;
+        // About half the flakes can land on a window's top edge (the rest fall past to the ground).
+        public bool Catches;
     }
 
     class Spark
@@ -173,6 +175,9 @@ namespace JuleHygge
         public bool CarriesGift;
         // Walking in from an edge, walking out for good, or walking over to the neighbouring screen.
         public bool Entering, Leaving, Crossing;
+        // Meeting another nisse to hand over or swap a gift.
+        public float MeetTimer, MeetCooldown;
+        public Nisse MeetWith;
         public System.Drawing.Color Tunic, Mitten, Gift;
     }
 }

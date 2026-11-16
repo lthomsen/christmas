@@ -13,7 +13,7 @@ namespace JuleHygge
 {
     // Styrer det hele: bakkeikon, hovedløkke, julemanden (på tværs af skærme), effekter og daglige begivenheder.
     // Selve tegningen sker i ét Layer-vindue pr. skærm.
-    class Controller : ApplicationContext
+    partial class Controller : ApplicationContext
     {
         [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
@@ -94,7 +94,7 @@ namespace JuleHygge
                 double calm = PowerSave ? Math.Min(Cfg.FrameRate, 12) : Cfg.FrameRate;
                 // Unlike macOS (60 fps for Santa), Windows uploads the whole overlay on every frame, so 60 fps
                 // costs about a full core (measured). Santa and the plow are boosted to 30 fps at most.
-                bool busy = SantaActive || Sparks.Count > 0 || Plow.Active;
+                bool busy = SantaActive || Sparks.Count > 0 || Plow.Active || Clumps.Count > 0;
                 foreach (var l in layers) if (l.IsBusy) busy = true;
                 if (busy) return Math.Max(calm, PowerSave ? 20 : 30);
                 return calm;
@@ -114,18 +114,32 @@ namespace JuleHygge
         }
 
         // ------------------------------------------------------------------ sleep
-        // Everything stops while the PC is locked, suspended or the display is off.
-        bool locked, suspended, displayOff;
+        // Everything stops while the PC is locked, suspended, the display is off or the screen saver runs.
+        // Each reason is tracked on its own, so e.g. the screen saver ending in front of the lock screen
+        // does not wake the overlay.
+        bool locked, suspended, displayOff, screenSaver;
         PowerWatcher powerWatcher;
+        Timer saverTimer;   // keeps polling for the screen saver while the main timer is stopped
+
+        [DllImport("user32.dll")] static extern bool SystemParametersInfo(int action, int param, out bool result, int winIni);
+        const int SPI_GETSCREENSAVERRUNNING = 0x72;
+
+        void CheckScreenSaver()
+        {
+            bool running;
+            if (!SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, out running, 0)) return;
+            if (running != screenSaver) { screenSaver = running; UpdateAsleep(); }
+        }
 
         void UpdateAsleep()
         {
-            bool asleep = locked || suspended || displayOff;
+            if (timer == null) return;   // a power notification can arrive while starting up
+            bool asleep = locked || suspended || displayOff || screenSaver;
             if (asleep && timer.Enabled)
             {
+                FinishRuns();
                 timer.Stop();
-                audio.StopAll();
-                ErrorLog.Debug("asleep (locked=" + locked + " suspended=" + suspended + " displayOff=" + displayOff + ")");
+                ErrorLog.Debug("asleep (locked=" + locked + " suspended=" + suspended + " displayOff=" + displayOff + " saver=" + screenSaver + ")");
             }
             else if (!asleep && !timer.Enabled)
             {
@@ -135,10 +149,23 @@ namespace JuleHygge
             }
         }
 
+        // Ends Santa's trip and the plow run at once, as if they had arrived, and stops the sound. Called when
+        // the overlay stops (screen saver, display off, lock) or frames stalled: otherwise they stay "on the
+        // way" and the jingle keeps looping.
+        void FinishRuns()
+        {
+            if (SantaActive || Plow.Active) ErrorLog.Debug("finish runs: santa=" + SantaActive + " plow=" + Plow.Active);
+            if (SantaActive) { SantaActive = false; santaNext = 60 + R() * 120; }
+            Sparks.Clear();
+            Clumps.Clear();
+            if (Plow.Active) { Plow.Active = false; Plow.Cooldown = 30; }
+            audio.StopAll();
+        }
+
         void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
             if (e.Reason == SessionSwitchReason.SessionLock) locked = true;
-            else if (e.Reason == SessionSwitchReason.SessionUnlock) locked = false;
+            else if (e.Reason == SessionSwitchReason.SessionUnlock) { locked = false; screenSaver = false; }   // back in the session: the saver is over
             invoker.BeginInvoke(new Action(UpdateAsleep));
         }
 
@@ -171,7 +198,16 @@ namespace JuleHygge
 
             if (Cfg.FirstRun == DateTime.MinValue) { Cfg.FirstRun = JuleClock.Today; Cfg.Save(); }
 
-            jingle = audio.CreateVoice(Synth.Jingle, true);
+            // window-snow sizes come from macOS points, scaled by the system DPI
+            using (var sg = Graphics.FromHwnd(IntPtr.Zero)) Ledge.U = Math.Max(1f, sg.DpiX / 96f);
+
+            // three tunes for Santa; each trip picks one at random
+            jingles = new Voice[Synth.Tune.All.Length];
+            for (int i = 0; i < jingles.Length; i++)
+            {
+                var tune = Synth.Tune.All[i];
+                jingles[i] = audio.CreateVoice(() => Synth.Jingle(tune), true);
+            }
             plowEngine = audio.CreateVoice(Synth.PlowEngine, true);
             plowScrape = audio.CreateVoice(Synth.PlowScrape, true);
             plowHorn = audio.CreateVoice(Synth.PlowHorn, false);
@@ -185,6 +221,10 @@ namespace JuleHygge
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
             powerWatcher = new PowerWatcher(on => { displayOff = !on; UpdateAsleep(); });
+            saverTimer = new Timer();
+            saverTimer.Interval = 1000;
+            saverTimer.Tick += (s, e) => { try { CheckScreenSaver(); } catch (Exception ex) { ErrorLog.Write(ex); } };
+            saverTimer.Start();
 
             timer = new Timer();
             timer.Tick += Tick;
@@ -230,6 +270,8 @@ namespace JuleHygge
         void TickCore()
         {
             double now = clock.Elapsed.TotalSeconds;
+            // frames stopped for a while (e.g. a screen saver we got no notice of): let Santa and the plow arrive
+            if (now - lastT > 2 && lastT > 0) FinishRuns();
             float dt = (float)Math.Min(0.1, now - lastT);
             lastT = now;
             Time += dt;
@@ -251,9 +293,12 @@ namespace JuleHygge
             fsTimer -= dt;
             if (fsTimer <= 0)
             {
-                fsTimer = 1;
+                // With snow on windows the scan runs 4 times a second, so piles follow moved windows and fall
+                // soon after a minimize; every frame while a window with snow moves.
+                fsTimer = !Cfg.WindowSnow ? 1 : (LedgeMoving() ? 0 : 0.25f);
                 // Always detected: layers either pause or move the snow ground to the screen bottom.
                 FullscreenRect = GetFullscreenRect();
+                if (Cfg.WindowSnow || Ledges.Count > 0) UpdateLedges(ScanWindows());
             }
 
             topTimer -= dt;
@@ -267,6 +312,7 @@ namespace JuleHygge
             UpdateSanta(dt);
             UpdateSparks(dt);
             UpdatePlow(dt);
+            UpdateWindowSnow(dt);
             if (celebrateAt > 0 && Time >= celebrateAt) { celebrateAt = -1; SnowmanCelebrate(); }
             if (plowAt >= 0 && Time >= plowAt) { plowAt = -1; SendPlow(); }
 
@@ -375,7 +421,9 @@ namespace JuleHygge
 
         // ------------------------------------------------------------------ sound
         readonly AudioHub audio = new AudioHub();
-        readonly Voice jingle, plowEngine, plowScrape, plowHorn;
+        readonly Voice[] jingles;
+        readonly Voice plowEngine, plowScrape, plowHorn;
+        int jingleIndex;
         bool hornedThisRun;
 
         float Volume { get { return new[] { 0.15f, 0.35f, 0.6f }[Math.Max(0, Math.Min(2, Cfg.SoundLevel))]; } }
@@ -384,20 +432,22 @@ namespace JuleHygge
         // Synthesizes the enabled sounds in the background ahead of time, so they are ready when needed.
         void WarmSounds()
         {
-            if (Cfg.Sound) jingle.Warm();
+            if (Cfg.Sound) foreach (var j in jingles) j.Warm();
             if (Cfg.PlowSound) { plowEngine.Warm(); plowScrape.Warm(); plowHorn.Warm(); }
         }
 
         // Pans each sound with what makes it (Santa, the plow) across all screens and fades it at the edges.
         void UpdateSound(float dt)
         {
-            if (Cfg.Sound || jingle.Playing)
             {
                 float span = Math.Max(1, santaMaxX - santaMinX);
                 float margin = 330 * SantaScale;
                 float presence = Math.Max(0, Math.Min(1, Math.Min(SantaX - (santaMinX - margin), (santaMaxX + margin) - SantaX) / margin));
                 bool on = SantaActive && Cfg.Sound && !SoundMuted;
-                jingle.Update(on ? presence * Volume : 0, (SantaX - santaMinX) / span * 2 - 1, dt);
+                // only this trip's tune plays; any other one still fading out keeps being updated until it is silent
+                for (int i = 0; i < jingles.Length; i++)
+                    if ((Cfg.Sound && i == jingleIndex) || jingles[i].Playing)
+                        jingles[i].Update(on && i == jingleIndex ? presence * Volume : 0, (SantaX - santaMinX) / span * 2 - 1, dt);
             }
             if (Cfg.PlowSound || plowEngine.Playing || plowScrape.Playing)
             {
@@ -463,7 +513,11 @@ namespace JuleHygge
             }
             SantaDir = R() < 0.5f ? 1 : -1;
             SantaX = SantaDir > 0 ? santaMinX - 420 * SantaScale : santaMaxX + 420 * SantaScale;
-            SantaSpeed = (190 + R() * 80) * SantaScale * (santaMaxX - santaMinX > b.Width * 1.5f ? 1.6f : 1f);
+            // ±10% speed per trip, and the tune plays at the same rate (a little faster and higher, or slower and lower)
+            float pace = 0.9f + R() * 0.2f;
+            jingleIndex = Rnd.Next(jingles.Length);
+            jingles[jingleIndex].Rate = pace;
+            SantaSpeed = 230 * pace * SantaScale * (santaMaxX - santaMinX > b.Width * 1.5f ? 1.6f : 1f);
             SantaPhase = 0;
             SantaActive = true;
         }
@@ -667,6 +721,7 @@ namespace JuleHygge
             }
             menu.Items.Add(level);
             menu.Items.Add(Toggle("Sne på proceslinjen", () => Cfg.SnowGround, v => Cfg.SnowGround = v));
+            menu.Items.Add(Toggle("Sne på vinduerne", () => Cfg.WindowSnow, v => Cfg.WindowSnow = v));
             snowmanItem = Toggle("Snemand", () => Cfg.Snowman, v => Cfg.Snowman = v);
             menu.Items.Add(snowmanItem);
             menu.Items.Add(new ToolStripSeparator());
@@ -709,7 +764,7 @@ namespace JuleHygge
             menu.Items.Add(new ToolStripSeparator());
 
             var power = new ToolStripMenuItem("Strømspare");
-            string[] powerNames = { "Fra - fuld sne på hele skærmen", "Til - sne over proceslinjen, stille blæser", "Kun når den bærbare kører på batteri" };
+            string[] powerNames = { "Fra - normal billedfrekvens", "Til - færre billeder/s, stille blæser", "Kun når den bærbare kører på batteri" };
             int[] powerValues = { 1, 2, 0 };
             foreach (int pv in powerValues)
             {
@@ -800,6 +855,7 @@ namespace JuleHygge
             SystemEvents.SessionSwitch -= OnSessionSwitch;
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             if (powerWatcher != null) powerWatcher.Dispose();
+            if (saverTimer != null) { saverTimer.Stop(); saverTimer.Dispose(); }
             if (calendar != null && !calendar.IsDisposed) calendar.Close();
             foreach (var l in layers) { l.Close(); l.Dispose(); }
             layers.Clear();

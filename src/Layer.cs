@@ -80,13 +80,11 @@ namespace JuleHygge
         List<Rectangle> dirty = new List<Rectangle>(), prevDirty = new List<Rectangle>();
         // Areas that changed on screen without needing a clear next frame (e.g. the cached lights strip).
         readonly List<Rectangle> presentOnly = new List<Rectangle>();
-        bool fullPresent = true, lastPowerSave, lightsShown;
+        bool fullPresent = true, lightsShown;
         // Unmanaged buffers for UpdateLayeredWindowIndirect (point, size, source point, blend, dirty rect).
         IntPtr ulwDst, ulwSize, ulwSrc, ulwBlend, ulwDirty;
 
         bool PS { get { return c.PowerSave; } }
-        // Top of the snow band used in power-save mode (snow falls only between here and the taskbar).
-        float BandTop { get { return Math.Max(0, groundY - H * 0.32f); } }
         int LightsHeight { get { return (int)(70 * S); } }
 
         static readonly Color SantaRed = Color.FromArgb(205, 25, 35), Gold = Color.FromArgb(235, 195, 70),
@@ -216,7 +214,7 @@ namespace JuleHygge
         {
             if (fullPresent) { Present(); return; }
             int topLimit = LightsHeight + 4;
-            int bottomStart = (int)((PS ? BandTop : groundY - 150 * S) - 10);
+            int bottomStart = (int)(groundY - 150 * S - 10);
             var boxes = new Rectangle[3];
             var has = new bool[3];
             foreach (var list in new[] { a, b, extra })
@@ -252,17 +250,6 @@ namespace JuleHygge
             }
             ReleaseDC(IntPtr.Zero, screenDc);
             if (!ok) Present();   // fall back to a full update if partial updates are not supported
-        }
-
-        // Starts over with an empty surface (used when power-save mode is switched on or off).
-        void ResetSurface()
-        {
-            ClearAll();
-            prevDirty.Clear();
-            dirty.Clear();
-            flakes.Clear();
-            lightsShown = false;
-            fullPresent = true;
         }
 
         void ClearAll()
@@ -303,7 +290,7 @@ namespace JuleHygge
                 return;
             }
             if (paused) { paused = false; fullPresent = true; }
-            if (PS != lastPowerSave) { lastPowerSave = PS; ResetSurface(); }
+
 
             UpdateSnow(dt);
             UpdatePlow(dt);
@@ -319,6 +306,8 @@ namespace JuleHygge
             presentOnly.Clear();
             if (cfg.Lights) DrawLights(dt, lightsDamaged);
             else if (lightsShown) { Mark(0, 0, W, LightsHeight); lightsShown = false; }
+            // snow on other windows sits on those windows, so everything that moves (Santa, sparks, nisser) is drawn over it
+            DrawLedges();
             DrawSantaAndSparks();
             if (IsPrimary && cfg.Snowman) DrawSnowman(); else SnowmanPos = PointF.Empty;
             DrawGround();
@@ -337,22 +326,43 @@ namespace JuleHygge
         {
             int[] baseCount = { 110, 260, 650 };
             float logicalArea = W * (float)H / (dpiScale * dpiScale);
-            // In power-save mode snow only covers the band above the taskbar, at a slightly higher density.
-            float areaShare = PS ? (groundY - BandTop) / H * 1.3f : 1f;
+            // Snow covers the whole screen also in power-save mode (like macOS); power-save only lowers the frame rate.
             // SnowIntensity makes the amount drift slowly between ~60% and ~140% of the chosen level.
-            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * areaShare * c.SnowIntensity) : 0;
+            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * c.SnowIntensity) : 0;
             // nye fnug kommer ind fra toppen; overskydende fnug forsvinder først når de lander
             int add = flakes.Count == 0 ? target : Math.Max(1, target / 60);
             for (int i = 0; i < add && flakes.Count < target; i++) flakes.Add(NewFlake(flakes.Count == 0 || c.Time < 1f));
 
             float wind = c.Wind * S;
+            float ox = ScreenBounds.X, oy = ScreenBounds.Y;
+            bool ledges = cfg.WindowSnow && c.LedgeList.Count > 0;
             for (int i = flakes.Count - 1; i >= 0; i--)
             {
                 var f = flakes[i];
+                float prevY = f.Y;
                 f.Y += f.Vy * dt;
                 f.X += (wind * (0.4f + f.R / (4 * S)) + (float)Math.Cos(c.Time * f.SwaySpd + f.Phase) * f.Sway) * dt;
                 f.Rot += f.RotSpd * dt;
                 if (f.X < -60) f.X += W + 120; else if (f.X > W + 60) f.X -= W + 120;
+                // some flakes land on a window's top edge (or the snow already on it)
+                if (f.Catches && ledges)
+                {
+                    float gx = f.X + ox, gy = f.Y + oy, py = prevY + oy;
+                    Ledge hit = null;
+                    foreach (var l in c.LedgeList)
+                    {
+                        if (l.Moving) continue;
+                        float top = l.Settled.Top - l.HeightAt(gx);
+                        if (py < top && gy >= top && l.IsVisible(gx)) { hit = l; break; }
+                    }
+                    if (hit != null)
+                    {
+                        hit.Deposit(gx, f.R / S);
+                        if (flakes.Count > target) flakes.RemoveAt(i);
+                        else flakes[i] = NewFlake(false);
+                        continue;
+                    }
+                }
                 if (f.Y >= groundY - HeapAt(f.X))
                 {
                     if (cfg.SnowGround) Deposit(f.X, f.R);
@@ -361,18 +371,51 @@ namespace JuleHygge
                 }
             }
 
-            float maxH = 18 * S, slope = 1.2f * S;
+            // Snowstorm: the wind carries snow along the pile, so it drifts up against the downwind screen edge,
+            // and flakes settle in long soft waves (the dune factor in Deposit). Drifts may grow taller and sink
+            // back slowly afterwards.
+            bool storm = c.EffectiveSnowLevel == 2 && c.SnowOn;
+            float windNorm = Math.Max(-1.5f, Math.Min(1.5f, c.Wind / 140));
+            if (storm && Math.Abs(windNorm) > 0.15f && heap.Length > 2)
+            {
+                float rate = 0.02f * Math.Abs(windNorm) * dt;
+                int dir = windNorm > 0 ? 1 : -1;
+                var moved = new float[heap.Length];
+                for (int i = 0; i < heap.Length; i++) moved[i] = heap[i] * rate;
+                for (int i = 0; i < heap.Length; i++)
+                {
+                    int j = i + dir;
+                    if (j < 0 || j >= heap.Length) continue;
+                    heap[i] -= moved[i]; heap[j] += moved[i];
+                }
+            }
+            float maxH = (storm ? 30 : 18) * S, slope = 1.2f * S;
             for (int i = 0; i < heap.Length - 1; i++)
             {
                 float d = heap[i] - heap[i + 1];
                 if (d > slope) { float m = (d - slope) * 0.3f; heap[i] -= m; heap[i + 1] += m; }
                 else if (d < -slope) { float m = (-d - slope) * 0.3f; heap[i] += m; heap[i + 1] -= m; }
             }
+            // snow falling off a window that went away lands in the pile below
+            foreach (var cl in c.Clumps)
+            {
+                if (cl.Dead) continue;
+                float x = cl.X - ox, y = cl.Y - oy;
+                if (x >= 0 && x < W && y >= 0 && y >= groundY - HeapAt(x))
+                {
+                    if (cfg.SnowGround) Deposit(x, cl.R * S);
+                    cl.Dead = true;
+                }
+            }
             bool melt = !c.SnowOn || !cfg.SnowGround;
             for (int i = 0; i < heap.Length; i++)
             {
                 if (melt) heap[i] = Math.Max(0, heap[i] - 3 * S * dt);
-                if (heap[i] > maxH) heap[i] = maxH;
+                // a full pile keeps soft bumps: the limit wavers along the screen (in global x, so screens line up),
+                // and above it the snow sinks back slowly instead of being cut off
+                double gxi = i * HeapStep + ox;
+                float lim = maxH * (0.78f + 0.22f * (float)(0.6 * Math.Sin(gxi / (37 * dpiScale)) + 0.4 * Math.Sin(gxi / (13.7 * dpiScale))));
+                if (heap[i] > lim) heap[i] = Math.Max(lim, heap[i] - 2 * S * dt);
             }
         }
 
@@ -383,8 +426,7 @@ namespace JuleHygge
             f.R = (1f + depth * depth * 3.5f) * S;
             f.Vy = (25f + depth * 55f + Rnd() * 15f) * S * (c.EffectiveSnowLevel == 2 ? 1.5f : 1f);
             f.X = rnd.Next(-50, W + 50);
-            float top = PS ? BandTop : 0;
-            f.Y = anywhere ? top + Rnd() * (groundY - top) : top - 10 - Rnd() * 60;
+            f.Y = anywhere ? Rnd() * groundY : -10 - Rnd() * 60;
             f.Phase = Rnd() * 6.28f;
             f.Sway = (8 + Rnd() * 20) * S;
             f.SwaySpd = 0.5f + Rnd() * 1.2f;
@@ -393,6 +435,7 @@ namespace JuleHygge
             if (f.Crystal) f.R *= 1.6f;
             f.Rot = Rnd() * 6.28f;
             f.RotSpd = (Rnd() - 0.5f) * 2f;
+            f.Catches = Rnd() < 0.5f;
             return f;
         }
 
@@ -400,6 +443,13 @@ namespace JuleHygge
         {
             int idx = (int)(x / HeapStep);
             float amount = 0.35f * r;
+            if (c.EffectiveSnowLevel == 2)
+            {
+                // dunes: long waves in global x (so they line up across screens), slowly wandering with the wind
+                double gx = x + ScreenBounds.X;
+                double dune = 0.5 + 0.5 * Math.Sin(gx / (240 * S) * 2 * Math.PI - c.Time * 0.03 * (c.Wind > 0 ? 1 : -1));
+                amount *= 0.3f + 1.4f * (float)dune;
+            }
             for (int k = -1; k <= 1; k++)
             {
                 int j = idx + k;
@@ -450,19 +500,26 @@ namespace JuleHygge
         void DrawSnow()
         {
             g.Flush(FlushIntention.Sync);
-            // In power-save mode flakes fade in over the top of the snow band instead of popping into view.
-            float top = PS ? BandTop : -1000f, fadeLen = 90 * S;
             foreach (var f in flakes)
             {
-                if (f.Y < -f.R * 2 || f.Y < top) continue;
+                if (f.Y < -f.R * 2) continue;
                 Mark(f.X - f.R, f.Y - f.R, f.R * 2, f.R * 2);
-                int a = PS ? (int)(f.A * Math.Min(1f, (f.Y - top) / fadeLen)) : f.A;
-                if (!f.Crystal && a > 0) BlendDot(f.X, f.Y, f.R, a);
+                if (!f.Crystal) BlendDot(f.X, f.Y, f.R, f.A);
+            }
+            // clumps falling off a window that went away
+            float ox = ScreenBounds.X, oy = ScreenBounds.Y;
+            foreach (var cl in c.Clumps)
+            {
+                if (cl.Dead) continue;
+                float x = cl.X - ox, y = cl.Y - oy, r = cl.R * S;
+                if (x < -10 || x > W + 10 || y < -10 || y > H + 10) continue;
+                Mark(x - r, y - r, r * 2, r * 2);
+                BlendDot(x, y, r, 242);
             }
             foreach (var f in flakes)
             {
-                if (!f.Crystal || f.Y < -f.R * 2 || f.Y < top) continue;
-                int alpha = PS ? (int)(f.A * Math.Min(1f, (f.Y - top) / fadeLen)) : f.A;
+                if (!f.Crystal || f.Y < -f.R * 2) continue;
+                int alpha = f.A;
                 if (alpha < 60) continue;
                 var pen = flakePens[Math.Max(0, Math.Min(15, (alpha - 60) / 13))];
                 pen.Width = Math.Max(1f, 0.9f * S);
@@ -473,6 +530,79 @@ namespace JuleHygge
                     g.DrawLine(pen, f.X - dx, f.Y - dy, f.X + dx, f.Y + dy);
                 }
             }
+        }
+
+        // Snow piles on other apps' window edges that cross this screen (WindowSnow.cs), with the drape hanging
+        // down over the edge. Only stretches where snow has actually landed are drawn (no thin line on bare edges).
+        void DrawLedges()
+        {
+            if (!cfg.WindowSnow || c.LedgeList.Count == 0) return;
+            float ox = ScreenBounds.X, oy = ScreenBounds.Y, step = Ledge.Step, u = Ledge.U;
+            var xs = new List<float>();
+            var hs = new List<float>();
+            var ds = new List<float>();
+            using (var fill = new SolidBrush(Color.FromArgb(245, 248, 252, 255)))
+            using (var line = new Pen(Color.FromArgb(110, 170, 200, 230), 1.2f * u))
+            {
+                foreach (var l in c.LedgeList)
+                {
+                    // a window dragged around (same size) takes its snow along, so the pile is hidden until it settles;
+                    // a window that shrinks (minimize) or is resized leaves the snow where it was until it is gone
+                    bool dragged = l.Moving && l.Rect.Size == l.Settled.Size;
+                    if (!l.HasSnow || dragged) continue;
+                    if (l.Settled.Right <= ox || l.Settled.Left >= ox + W || l.Settled.Top <= oy || l.Settled.Top > oy + H) continue;
+                    float baseY = l.Settled.Top - oy;
+                    Action flush = () =>
+                    {
+                        if (xs.Count >= 2) DrawLedgeRun(xs, hs, ds, baseY, fill, line);
+                        xs.Clear(); hs.Clear(); ds.Clear();
+                    };
+                    foreach (var seg in l.Visible)
+                    {
+                        float x0 = Math.Max(seg[0], ox), x1 = Math.Min(seg[1], ox + W);
+                        if (x1 - x0 < 4) continue;
+                        float x = x0;
+                        for (; x <= x1; x += step)
+                        {
+                            float h = l.HeightAt(x), d = l.HangAt(x);
+                            if (h > 0.6f * u || d > 0.6f * u)
+                            {
+                                // start and end each stretch on the edge itself, so the pile tapers off
+                                if (xs.Count == 0) { xs.Add(Math.Max(x0, x - step) - ox); hs.Add(0); ds.Add(0); }
+                                xs.Add(x - ox); hs.Add(h); ds.Add(d);
+                            }
+                            else if (xs.Count > 0) { xs.Add(x - ox); hs.Add(0); ds.Add(0); flush(); }
+                        }
+                        if (xs.Count > 0) { xs.Add(Math.Min(x1, x) - ox); hs.Add(0); ds.Add(0); flush(); }
+                    }
+                }
+            }
+        }
+
+        // One stretch: the pile's top from left to right, then back along the drape hanging below the edge.
+        void DrawLedgeRun(List<float> xs, List<float> hs, List<float> ds, float baseY, Brush fill, Pen line)
+        {
+            int n = xs.Count;
+            var top = new PointF[n];
+            var low = new PointF[n];
+            float maxH = 0, maxD = 0;
+            for (int i = 0; i < n; i++)
+            {
+                top[i] = new PointF(xs[i], baseY - hs[i]);
+                low[n - 1 - i] = new PointF(xs[i], baseY + 0.5f + ds[i]);
+                maxH = Math.Max(maxH, hs[i]); maxD = Math.Max(maxD, ds[i]);
+            }
+            Mark(xs[0] - 2, baseY - maxH - 3, xs[n - 1] - xs[0] + 4, maxH + maxD + 6);
+            using (var path = new GraphicsPath())
+            {
+                path.AddCurve(top, 0.5f);
+                path.AddCurve(low, 0.5f);
+                path.CloseFigure();
+                g.FillPath(fill, path);
+            }
+            g.DrawCurve(line, top, 0.5f);
+            // a faint outline under the drape where it hangs down, for depth
+            if (maxD > Ledge.U) g.DrawCurve(line, low, 0.5f);
         }
 
         void DrawGround()
@@ -1013,8 +1143,27 @@ namespace JuleHygge
                 }
             }
 
+            MeetNisser();
             foreach (var n in nisser)
             {
+                n.MeetCooldown = Math.Max(0, n.MeetCooldown - dt);
+                if (n.MeetTimer > 0)
+                {
+                    float before = n.MeetTimer;
+                    n.MeetTimer -= dt;
+                    // halfway through the meeting the gift changes hands
+                    if (before > MeetTime / 2 && n.MeetTimer <= MeetTime / 2 && n.MeetWith != null) ExchangeGifts(n, n.MeetWith);
+                    if (n.MeetTimer <= 0)
+                    {
+                        // say goodbye and walk on, each in its own direction (past each other)
+                        n.MeetWith = null;
+                        n.State = 0;
+                        n.StateTimer = 4 + Rnd() * 6;
+                        n.MeetCooldown = 20;
+                    }
+                    n.T += dt;
+                    continue;
+                }
                 // Wrap at 200π (a whole number of periods for both the wave and the hat sway) so the
                 // float never grows large enough to lose precision during long uptimes.
                 n.T += dt;
@@ -1066,6 +1215,51 @@ namespace JuleHygge
                 var next = c.Neighbor(this, n.Dir);
                 if (next != null && cfg.Nisser) next.ReceiveNisse(n, S);
             }
+        }
+
+        const float MeetTime = 2.4f;
+
+        static bool FreeToMeet(Nisse n)
+        {
+            return n.State == 0 && n.MeetTimer <= 0 && n.MeetCooldown <= 0 && !n.Entering && !n.Leaving && !n.Crossing;
+        }
+
+        // Two nisser walking toward each other stop when they meet, if at least one of them carries a gift.
+        void MeetNisser()
+        {
+            foreach (var a in nisser)
+            {
+                if (!FreeToMeet(a)) continue;
+                foreach (var b in nisser)
+                {
+                    if (b == a || !FreeToMeet(b) || a.Dir == b.Dir || !(a.CarriesGift || b.CarriesGift)) continue;
+                    float d = b.X - a.X;
+                    // b is in front of a, close enough to reach out
+                    if (d * a.Dir <= 0 || Math.Abs(d) >= 24 * S * (a.Size + b.Size) / 2) continue;
+                    a.MeetTimer = b.MeetTimer = MeetTime;
+                    a.State = b.State = 1;
+                    a.MeetWith = b;
+                    b.MeetWith = null;
+                    return;   // one meeting at a time is plenty
+                }
+            }
+        }
+
+        // One gift: it goes to the other nisse. Two gifts: they swap.
+        static void ExchangeGifts(Nisse a, Nisse b)
+        {
+            if (a.CarriesGift && b.CarriesGift)
+            {
+                var t = a.Gift; a.Gift = b.Gift; b.Gift = t;
+            }
+            else
+            {
+                Nisse giver = a.CarriesGift ? a : b, taker = a.CarriesGift ? b : a;
+                taker.CarriesGift = true;
+                taker.Gift = giver.Gift;
+                giver.CarriesGift = false;
+            }
+            ErrorLog.Debug("nisser mødtes: gave " + (a.CarriesGift && b.CarriesGift ? "byttet" : "overrakt"));
         }
 
         void AddNisse(bool walkingIn)

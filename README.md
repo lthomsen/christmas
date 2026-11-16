@@ -13,9 +13,12 @@ Et lille juleoverlay til Windows og macOS: snevejr, sne der lægger sig på proc
 ### Also on Windows (ported from the macOS version)
 - **Organic variation:** snowfall drifts slowly between ~60% and ~140% of the chosen amount, and every 1½–3 minutes a nisse walks in or out (at most ±2 from the chosen count).
 - **Across screens:** nisser walk over to a neighbouring screen about half the time, and the snow plow drives one continuous run across side-by-side screens.
-- **Frame rate menu** (12/20/30/60 fps for the calm scene); Santa gets 60 fps and the plow 30 fps only while they move. Power-save caps the calm scene at 12 fps.
-- **Stops completely** while the PC is locked, suspended or the display is off.
-- **Sound** (off by default, switched on separately in the menu): sleigh bells and the "Jingle Bells" chorus (Pierpont 1857, public domain) for Santa; engine, scraping and horn for the snow plow. Panned with the figure across the screens and synthesized in code (no sound files).
+- **Frame rate menu** (12/20/30/60 fps for the calm scene, default 20); Santa and the plow are boosted to 30 fps only while they move. Power-save caps the calm scene at 12 fps; snow still covers the whole screen.
+- **Snow on windows** (menu "Sne på vinduerne", on by default): some flakes land on the top edge of other apps' windows, pile up, and hang down over the edge in soft lobes once deep. Snow is hidden behind windows in front, follows a moved window once it settles, and falls as clumps into the ground pile when the window is minimized or closed. Maximized and fullscreen windows carry no snow.
+- **Snowstorm drifts:** the wind carries snow along the ground and window edges into drifts at the downwind end, flakes settle in long waves, and full piles keep soft bumps on top.
+- **Nisser exchange gifts:** two nisser meeting each other stop; a gift is handed over, or swapped if both carry one.
+- **Stops completely** while the PC is locked, suspended, the display is off or the screen saver runs. Santa's trip and the plow run end at once (as if they had arrived) and the sound stops.
+- **Sound** (off by default, switched on separately in the menu): sleigh bells and one of three public-domain tunes for Santa — "Jingle Bells" (Pierpont 1857), "Deck the Halls" or "We Wish You a Merry Christmas" — played a little faster or slower with Santa's ±10% pace; engine, scraping and horn for the snow plow. Panned with the figure across the screens and synthesized in code (no sound files).
 - **Restarts itself after a crash:** a small supervisor process runs the app and restarts it after 5 s (it gives up after 3 quick crashes). Quitting from the menu closes both, so two `JuleHygge.exe` processes are expected.
 
 ## macOS
@@ -62,6 +65,7 @@ Al grafik tegnes i koden, så der ikke er billedfiler.
 | `src/Settings.cs` | Indlæsning og gemning af indstillinger |
 | `src/Sound.cs` | Sound synthesis (jingle, snow plow) and `waveOut` playback on its own thread |
 | `src/PowerWatcher.cs` | Detects when the display turns off or on |
+| `src/WindowSnow.cs` | Snow on other apps' window edges: window scan, piles, drapes, falling clumps |
 
 ## Ideer til næste version
 - Sne der lægger sig på toppen af åbne vinduer
