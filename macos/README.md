@@ -5,6 +5,7 @@ Native macOS-udgave (Swift + AppKit + Core Animation) af juleoverlayet. Samme in
 - Bor i **menulinjen** (snefnug-ikonet), ingen Dock-ikon. Klik på ikonet for indstillinger og julekalender.
 - Overlayet ligger over alle vinduer og Docken, men man klikker igennem det. Det følger med til alle Spaces.
 - Sne og nisser ligger i **bunden af skærmen** på alle skærme.
+- Mængden varierer organisk: snefaldet svinger langsomt mellem ca. 60 % og 140 % af den valgte mængde (to bølger på ca. 3 og 7 minutter), og hvert 1½–3 minut kommer eller går en nisse (højst ±2 fra det valgte antal, med træk tilbage mod det). Nye nisser går ind fra skærmkanten, og nisser der går, går ud ad den nærmeste kant.
 - Pauser automatisk, når en app kører i fuldskærm (kan slås fra).
 - **Strømspare** slår til på batteri eller i macOS' strømsparetilstand: sne kun nederst og 20 i stedet for 30 billeder/s.
 - Notifikationer når dagens låge er klar (klik åbner kalenderen).
@@ -45,6 +46,7 @@ Appen er ad-hoc-signeret; til distribution kræves Developer ID-signering og not
 | `JULE_FPS=N` | fast billedfrekvens (til målinger) |
 | `JULE_DEEPSNOW=1` | starter med fuld snedrive (til test af sneploven) |
 | `JULE_TICKS=1` | skriver faktiske billeder/s til stderr |
+| `JULE_NISSE_SECONDS=N` | nisser kommer/går hvert N. sekund, og antal/snemængde skrives til stderr |
 | `--login=on` / `--login=off` | slår start ved login til/fra |
 
 Eksempel (kør binæren direkte for at kunne sætte miljøvariabler):

@@ -45,6 +45,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     var effectiveSnowLevel: Int { time < stormUntil ? 2 : cfg.snowLevel }
     var snowOn: Bool { cfg.snow || time < stormUntil }
 
+    /// Snowfall slowly drifts between ~60 % and ~140 % of the chosen amount (two slow waves of about
+    /// 3 and 7 minutes with random phases), so it feels organic but averages out to the chosen level.
+    private let snowPhaseA = Double.random(in: 0..<(2 * .pi)), snowPhaseB = Double.random(in: 0..<(2 * .pi))
+    var snowIntensity: F {
+        if time < stormUntil { return 1 }
+        return F(1 + 0.25 * sin(time * 2 * .pi / 190 + snowPhaseA) + 0.15 * sin(time * 2 * .pi / 430 + snowPhaseB))
+    }
+
     override init() {
         super.init()
         if cfg.firstRun == nil { cfg.firstRun = JuleClock.today; cfg.save() }

@@ -137,6 +137,9 @@ final class ScreenOverlay {
     private var heap: [F]
     private let heapStep: F = 4
     private var nisser: [Nisse] = []
+    /// How many nisser more or fewer than the chosen number are around right now (−2…+2).
+    private var nisseOffset = 0
+    private var nisseChangeTimer: F = F(Double(ProcessInfo.processInfo.environment["JULE_NISSE_SECONDS"] ?? "") ?? Double(90 + R() * 90))
     private var nisseLayers: [CALayer] = []
     /// Pre-rendered poses, shared by every nisse with the same clothes: key = variant + state + frame.
     private var nisseFrames: [String: CGImage] = [:]
@@ -258,7 +261,7 @@ final class ScreenOverlay {
         let logicalArea = W * H
         // In power-save mode snow only covers the band at the bottom, at a slightly higher density.
         let areaShare: F = PS ? (groundY - bandTop) / H * 1.3 : 1
-        let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare) : 0
+        let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity) : 0
         // new flakes come in from the top; surplus flakes disappear only when they land
         let add = flakes.isEmpty ? target : max(1, target / 60)
         var i = 0
@@ -737,31 +740,34 @@ final class ScreenOverlay {
     }
 
     private func updateNisser(_ dt: F) {
-        let target = cfg.nisser ? cfg.nisseCount : 0
-        while nisser.count < target {
-            let n = Nisse()
-            n.x = 60 * S + R() * (W - 120 * S)
-            n.dir = R() < 0.5 ? -1 : 1
-            n.speed = (22 + R() * 18) * S
-            n.size = 0.85 + R() * 0.3
-            let ti = Int.random(in: 0..<Self.tunics.count)
-            n.tunic = Self.tunics[ti]
-            n.mitten = ti == 2 ? C(40, 105, 65) : Self.hatRed   // red tunic gets green mittens
-            n.carriesGift = R() < 0.4
-            let gi = Int.random(in: 0..<Self.gifts.count)
-            n.gift = Self.gifts[gi]
-            n.variant = "\(ti)-\(n.carriesGift ? gi : -1)"
-            n.stateTimer = 3 + R() * 6
-            n.t = R() * 10
-            nisser.append(n)
-            let l = CALayer()
-            l.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "transform": NSNull(), "hidden": NSNull()]
-            nisseLayer.addSublayer(l)
-            nisseLayers.append(l)
+        // Every 1½–3 minutes a nisse arrives or leaves. The offset is pulled back toward 0, so the
+        // number swings a little up and down but stays around the chosen count over time.
+        nisseChangeTimer -= dt
+        if nisseChangeTimer <= 0 {
+            // JULE_NISSE_SECONDS=N changes the interval (for testing)
+            nisseChangeTimer = F(Double(ProcessInfo.processInfo.environment["JULE_NISSE_SECONDS"] ?? "") ?? Double(90 + R() * 90))
+            if nisseOffset == 0 { nisseOffset = R() < 0.5 ? -1 : 1 }
+            else if R() < 0.7 { nisseOffset += nisseOffset > 0 ? -1 : 1 }
+            else { nisseOffset = max(-2, min(2, nisseOffset + (nisseOffset > 0 ? 1 : -1))) }
         }
-        while nisser.count > target {
-            nisser.removeLast()
-            nisseLayers.removeLast().removeFromSuperlayer()
+        let target = cfg.nisser ? max(1, cfg.nisseCount + nisseOffset) : 0
+        if ProcessInfo.processInfo.environment["JULE_NISSE_SECONDS"] != nil, frameNo % 40 == 0, isPrimary {
+            FileHandle.standardError.write("t=\(Int(c.time)) target=\(target) nisser=\(nisser.count) leaving=\(nisser.filter { $0.leaving }.count) entering=\(nisser.filter { $0.entering }.count) snow=\(String(format: "%.2f", c.snowIntensity))\n".data(using: .utf8)!)
+        }
+        let staying = nisser.filter { !$0.leaving }.count
+        if staying < target {
+            // At start-up everyone is already there; later arrivals walk in from a screen edge.
+            let arriving = !nisser.isEmpty || c.time > 2
+            for _ in 0..<(arriving ? 1 : target - staying) { addNisse(walkingIn: arriving) }
+        } else if staying > target {
+            if !cfg.nisser {
+                while !nisser.isEmpty { removeNisse(at: nisser.count - 1) }
+            } else if let n = nisser.last(where: { !$0.leaving }) {
+                // walks off at the nearest edge
+                n.leaving = true
+                n.state = 0
+                n.dir = n.x < W / 2 ? -1 : 1
+            }
         }
 
         for n in nisser {
@@ -772,14 +778,20 @@ final class ScreenOverlay {
             if n.state == 0 {
                 n.x += n.dir * n.speed * dt
                 n.walkPhase += dt * n.speed / (4.5 * S)
-                if n.x < 30 * S { n.x = 30 * S; n.dir = 1 }
-                if n.x > W - 30 * S { n.x = W - 30 * S; n.dir = -1 }
+                if n.entering && n.x > 30 * S && n.x < W - 30 * S { n.entering = false }
+                if !n.entering && !n.leaving {
+                    if n.x < 30 * S { n.x = 30 * S; n.dir = 1 }
+                    if n.x > W - 30 * S { n.x = W - 30 * S; n.dir = -1 }
+                }
+                if n.entering || n.leaving { continue }   // no stopping or turning while arriving or leaving
                 if n.stateTimer <= 0 {
                     let r = R()
                     if r < 0.3 { n.state = 1; n.stateTimer = 2 + R() * 3 }
                     else if r < 0.5 { n.state = 2; n.stateTimer = 2.5 }
                     else { if r < 0.7 { n.dir = -n.dir }; n.stateTimer = 4 + R() * 8 }
                 }
+            } else if n.leaving {
+                n.state = 0   // stop waving and keep walking out
             } else if n.stateTimer <= 0 {
                 n.state = 0
                 n.stateTimer = 4 + R() * 8
@@ -788,10 +800,46 @@ final class ScreenOverlay {
         }
     }
 
+    private func addNisse(walkingIn: Bool) {
+        let n = Nisse()
+        n.dir = R() < 0.5 ? -1 : 1
+        if walkingIn {
+            n.entering = true
+            n.x = n.dir > 0 ? -40 * S : W + 40 * S
+        } else {
+            n.x = 60 * S + R() * (W - 120 * S)
+        }
+        n.speed = (22 + R() * 18) * S
+        n.size = 0.85 + R() * 0.3
+        let ti = Int.random(in: 0..<Self.tunics.count)
+        n.tunic = Self.tunics[ti]
+        n.mitten = ti == 2 ? C(40, 105, 65) : Self.hatRed   // red tunic gets green mittens
+        n.carriesGift = R() < 0.4
+        let gi = Int.random(in: 0..<Self.gifts.count)
+        n.gift = Self.gifts[gi]
+        n.variant = "\(ti)-\(n.carriesGift ? gi : -1)"
+        n.stateTimer = 4 + R() * 6
+        n.t = R() * 10
+        nisser.append(n)
+        let l = CALayer()
+        l.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "transform": NSNull(), "hidden": NSNull()]
+        nisseLayer.addSublayer(l)
+        nisseLayers.append(l)
+    }
+
+    private func removeNisse(at i: Int) {
+        nisser.remove(at: i)
+        nisseLayers.remove(at: i).removeFromSuperlayer()
+    }
+
     // Frames per cycle: walking (legs + hat sway, period 4π of the walk phase), standing (hat sway), waving (arm).
     private static let walkFrames = 16, standFrames = 8, waveFrames = 8
 
     private func renderNisser() {
+        // nisser that have walked off the screen are gone
+        for i in stride(from: nisser.count - 1, through: 0, by: -1) where nisser[i].leaving && (nisser[i].x < -45 * S || nisser[i].x > W + 45 * S) {
+            removeNisse(at: i)
+        }
         for (i, n) in nisser.enumerated() {
             let sc = S * n.size
             let gy = groundY - heapAt(n.x) + 2 * S
