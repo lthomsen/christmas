@@ -250,6 +250,9 @@ final class ScreenOverlay {
         lightsLayer.frame = root.bounds
         lightsLayer.isHidden = true
         root.addSublayer(lightsLayer)
+        // snow on other windows sits on those windows, so everything that moves (Santa, sparks, nisser) is drawn over it
+        ledgeLayer.frame = root.bounds
+        root.addSublayer(ledgeLayer)
         sparkPool = DotPool(in: root, screenHeight: h)
         santaSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSanta(g) }
         snowmanSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSnowman(g) }
@@ -262,8 +265,6 @@ final class ScreenOverlay {
         groundLine.fillColor = nil
         groundLine.strokeColor = C(170, 200, 230, 110)
         groundLine.lineWidth = 1.5 * S
-        ledgeLayer.frame = root.bounds
-        root.addSublayer(ledgeLayer)
         nisseLayer.frame = root.bounds
         root.addSublayer(nisseLayer)
         plowBitPool = DotPool(in: root, screenHeight: h)
