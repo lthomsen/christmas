@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import QuartzCore
 
 /// A small layer whose content is redrawn by a closure. The closure draws in the screen's own
@@ -94,6 +95,11 @@ final class DotPool {
 }
 
 /// Pre-rendered images for the pooled layers (drawn once per screen scale).
+/// Core Image context for the camera compositing (GPU).
+enum GPU {
+    static let ciContext = CIContext(options: [.cacheIntermediates: false])
+}
+
 final class DotImages {
     let flake, crystal, goldDot, whiteDot, goldGlint, whiteGlint, goldStar, whiteStar, smoke, chunk: CGImage
 
@@ -127,7 +133,11 @@ final class DotImages {
 final class ScreenOverlay {
     unowned let c: Controller
     var cfg: Settings { c.cfg }
-    let window: NSWindow
+    /// nil for the virtual screen used as the camera background (it has no window).
+    let window: NSWindow?
+    /// True for the offscreen "third screen" behind the user in the virtual camera.
+    let isVirtual: Bool
+    private let backingScale: F
     let root: CALayer
     let isPrimary: Bool
     /// The screen in global coordinates with origin top-left of the primary screen, y down.
@@ -173,36 +183,66 @@ final class ScreenOverlay {
     static let santaRed = C(205, 25, 35), gold = C(235, 195, 70), skin = C(255, 214, 186),
         deer = C(145, 95, 55), deerDark = C(100, 62, 32), hatRed = C(210, 30, 40)
 
-    init(controller: Controller, screen: NSScreen) {
-        c = controller
+    convenience init(controller: Controller, screen: NSScreen) {
         let frame = screen.frame
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? frame.maxY
-        screenBounds = CGRect(x: frame.minX, y: primaryTop - frame.maxY, width: frame.width, height: frame.height)
-        W = frame.width; H = frame.height
-        isPrimary = frame.origin == .zero
+        self.init(controller: controller,
+                  bounds: CGRect(x: frame.minX, y: primaryTop - frame.maxY, width: frame.width, height: frame.height),
+                  lightsTop: max(0, frame.maxY - screen.visibleFrame.maxY),   // the lights hang just below the menu bar
+                  scale: screen.backingScaleFactor, isPrimary: frame.origin == .zero, screenFrame: frame)
+    }
+
+    /// The virtual "third screen" for the camera background: no window, rendered offscreen with `render(into:)`.
+    /// It sits far away from the real screens in global coordinates, so nothing crosses into it by accident.
+    convenience init(virtualFor controller: Controller, width: F, height: F) {
+        self.init(controller: controller, bounds: CGRect(x: 1_000_000, y: 0, width: width, height: height),
+                  lightsTop: 0, scale: 1, isPrimary: true, screenFrame: nil)
+    }
+
+    private init(controller: Controller, bounds: CGRect, lightsTop: F, scale: F, isPrimary: Bool, screenFrame: CGRect?) {
+        c = controller
+        screenBounds = bounds
+        W = bounds.width; H = bounds.height
+        self.isPrimary = isPrimary
+        isVirtual = screenFrame == nil
         groundY = H
-        // The lights hang just below the menu bar.
-        lightsTop = max(0, frame.maxY - screen.visibleFrame.maxY)
-        S = max(0.6, H / 1080)
-        let scale = screen.backingScaleFactor
+        self.lightsTop = lightsTop
+        // The camera picture is small and the person covers the middle, so figures are drawn larger there.
+        S = screenFrame == nil ? 1.25 : max(0.6, H / 1080)
+        backingScale = scale
         images = DotImages(scale: scale)
         // JULE_DEEPSNOW=1 starts with a full snow pile (to test the plow throwing snow).
-        heap = Array(repeating: ProcessInfo.processInfo.environment["JULE_DEEPSNOW"] != nil ? 18 * max(0.6, frame.height / 1080) : 0, count: Int(W / heapStep) + 2)
+        heap = Array(repeating: ProcessInfo.processInfo.environment["JULE_DEEPSNOW"] != nil ? 18 * max(0.6, bounds.height / 1080) : 0, count: Int(W / heapStep) + 2)
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H), styleMask: .borderless, backing: .buffered, defer: false)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.level = .statusBar   // over the Dock
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        window.isReleasedWhenClosed = false
-        window.title = "JuleHygge"
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
-        view.wantsLayer = true
-        window.contentView = view
-        window.setFrame(frame, display: false)
-        root = view.layer!
+        if let frame = screenFrame {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H), styleMask: .borderless, backing: .buffered, defer: false)
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = false
+            window.ignoresMouseEvents = true
+            window.level = .statusBar   // over the Dock
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+            window.isReleasedWhenClosed = false
+            window.title = "JuleHygge"
+            let view = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+            view.wantsLayer = true
+            window.contentView = view
+            window.setFrame(frame, display: false)
+            root = view.layer!
+            self.window = window
+        } else {
+            // Offscreen: a plain layer tree with a winter night sky behind everything.
+            root = CALayer()
+            root.frame = CGRect(x: 0, y: 0, width: W, height: H)
+            root.isGeometryFlipped = false
+            let sky = CAGradientLayer()
+            sky.frame = root.bounds
+            sky.colors = [C(52, 78, 120), C(14, 24, 48)]   // bottom → top (layer y is up)
+            sky.startPoint = CGPoint(x: 0.5, y: 0)
+            sky.endPoint = CGPoint(x: 0.5, y: 1)
+            root.addSublayer(sky)
+            window = nil
+        }
 
         let h = H
         lightsSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.renderLights(g) }
@@ -227,7 +267,50 @@ final class ScreenOverlay {
         plowSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawPlow(g) }
         flakePool = DotPool(in: root, screenHeight: h)
 
-        window.orderFrontRegardless()
+        window?.orderFrontRegardless()
+    }
+
+    /// Renders the virtual screen to an image (camera background). The layer tree is walked and drawn by hand:
+    /// CALayer.render(in:) creates an offscreen buffer for every layer with transparency, which made ~260
+    /// snowflakes take ~900 ms per frame. Drawn directly, each flake is one image draw with an alpha value.
+    func renderSceneImage() -> CGImage? {
+        let w = Int(W), h = Int(H)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.interpolationQuality = .low
+        Self.drawTree(root, into: ctx, alpha: 1)
+        return ctx.makeImage()
+    }
+
+    /// Draws a layer and its sublayers (the kinds this app uses: images, sprites, shapes, a gradient).
+    /// The context is y-up, like the layers.
+    private static func drawTree(_ l: CALayer, into g: CGContext, alpha: CGFloat) {
+        if l.isHidden || l.opacity <= 0 { return }
+        let a = alpha * CGFloat(l.opacity)
+        g.saveGState()
+        g.translateBy(x: l.position.x, y: l.position.y)
+        g.concatenate(l.affineTransform())
+        g.translateBy(x: -l.bounds.width * l.anchorPoint.x, y: -l.bounds.height * l.anchorPoint.y)
+        g.setAlpha(a)
+        let r = CGRect(origin: .zero, size: l.bounds.size)
+        if let grad = l as? CAGradientLayer, let colors = grad.colors as? [CGColor],
+           let gr = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors as CFArray, locations: nil) {
+            g.drawLinearGradient(gr, start: CGPoint(x: grad.startPoint.x * r.width, y: grad.startPoint.y * r.height),
+                                 end: CGPoint(x: grad.endPoint.x * r.width, y: grad.endPoint.y * r.height),
+                                 options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        } else if let shape = l as? CAShapeLayer, let path = shape.path {
+            if let f = shape.fillColor { g.setFillColor(f); g.addPath(path); g.fillPath() }
+            if let st = shape.strokeColor, shape.lineWidth > 0 {
+                g.setStrokeColor(st); g.setLineWidth(shape.lineWidth); g.addPath(path); g.strokePath()
+            }
+        } else if let c = l.contents, CFGetTypeID(c as CFTypeRef) == CGImage.typeID {
+            g.draw(c as! CGImage, in: r)
+        } else if let sprite = l.delegate as? Sprite {
+            sprite.draw(l, in: g)
+        }
+        for sub in l.sublayers ?? [] { drawTree(sub, into: g, alpha: a) }
+        g.restoreGState()
     }
 
     /// Tears the overlay down in a safe order: first every sprite is disconnected from its layer, then the
@@ -236,14 +319,23 @@ final class ScreenOverlay {
     func close() {
         for sp in [lightsSprite, santaSprite, snowmanSprite, plowSprite] { sp?.detach() }
         root.sublayers?.forEach { $0.removeFromSuperlayer() }
-        window.orderOut(nil)
-        window.close()
+        window?.orderOut(nil)
+        window?.close()
     }
 
-    func keepOnTop() { if !paused { window.orderFrontRegardless() } }
+    func keepOnTop() { if !paused { window?.orderFrontRegardless() } }
+
+    /// Hidden and not updated while JuleHygge Kamera is in use (saves the work for the camera picture).
+    private(set) var suspended = false
+    func setSuspended(_ on: Bool) {
+        guard on != suspended else { return }
+        suspended = on
+        root.isHidden = on || paused
+    }
 
     // ------------------------------------------------------------------ én frame
     func frame(_ dt: F) {
+        if suspended { return }
         let fullscreen = c.fullscreenRects.contains { abs($0.minX - screenBounds.minX) < 2 && abs($0.minY - screenBounds.minY) < 2 &&
             abs($0.width - screenBounds.width) < 2 && abs($0.height - screenBounds.height) < 2 }
         if fullscreen && cfg.pauseFullscreen {
@@ -275,7 +367,7 @@ final class ScreenOverlay {
         let logicalArea = W * H
         // In power-save mode snow only covers the band at the bottom, at a slightly higher density.
         let areaShare: F = PS ? (groundY - bandTop) / H * 1.3 : 1
-        let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity) : 0
+        let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity * (isVirtual ? 1.8 : 1)) : 0
         // new flakes come in from the top; surplus flakes disappear only when they land
         let add = flakes.isEmpty ? target : max(1, target / 60)
         var i = 0
@@ -907,7 +999,7 @@ final class ScreenOverlay {
     /// Draws one pose at the largest nisse size; smaller nisser and the walking direction are GPU scaling.
     private func renderNisseFrame(_ n: Nisse, _ frame: Int, _ key: String) -> CGImage {
         let maxSc = S * 1.15
-        let img = renderImage(width: 64 * maxSc, height: 80 * maxSc, scale: window.backingScaleFactor) { g in
+        let img = renderImage(width: 64 * maxSc, height: 80 * maxSc, scale: backingScale) { g in
             g.scaleBy(x: maxSc, y: maxSc)
             g.translateBy(x: 32, y: 72)
             drawNisse(g, n, frame)
@@ -1018,7 +1110,7 @@ final class ScreenOverlay {
     }
 
     private func buildBulbs() {
-        let scale = window.backingScaleFactor
+        let scale = backingScale
         let w = 7 * S, h = 11 * S, bw = 26 * S, bh = 28 * S
         let bright = Self.bulbColors.map { col in
             renderImage(width: bw, height: bh, scale: scale) { g in

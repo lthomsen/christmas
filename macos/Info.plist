@@ -14,5 +14,6 @@
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>NSCameraUsageDescription</key><string>JuleHygge Kamera bruger dit kamera til at vise dig foran julescenen i Teams og andre videoapps.</string>
 </dict>
 </plist>

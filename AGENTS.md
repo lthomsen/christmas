@@ -42,5 +42,12 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - **Strøm:** Mål med `macos/measure.sh` før og efter ændringer i tegnekoden — både app og WindowServer. Brug ikke Core Animation-animationer (de kører med 120 Hz); alt drives af den fælles timer. Se afsnittet "Strømforbrug" i `macos/README.md`.
 - Figurernes tegne-closures må aldrig holde overlayet som `unowned` (brug `[weak self]`): ved skærmskift kan AppKit bede et lag tegne, mens overlayet nedlægges. Det crashede appen, da en ekstern skærm blev taget ud (rettet 2026-11-16).
 - Genstart efter crash klares af vagtprocessen i `main.swift`, ikke af en launch agent: `SMAppService.agent` er bundet til kodesignaturen og afvises efter hver ad-hoc-build. Når du tester med `build/`-kopien, så luk først den installerede app (`osascript -e 'tell application id "dk.julehygge.JuleHygge" to quit'`), ellers lukker testkopien sig selv (kun én ad gangen).
+- **JuleHygge Kamera** (`macos/CameraExtension/`, `VirtualCamera.swift`): byg og installér med `macos/xcbuild.sh` (Xcode-projektet genereres af `tools/make-xcodeproj.py`). Erfaringer:
+  - CoreMediaIO angiver strømmens retning set fra enheden: billedet apps læser er "input" (1), og udvidelsens sink er "output" (0). Det modsatte valg fylder sink-køen med udvidelsens egne billeder (rettet 2026-11-16).
+  - Udvidelsens egne `Logger`-linjer kommer ikke frem i `log show`/`log stream` (den kører som systembruger). Fejlsøg fra appens side eller via en egen egenskab.
+  - En ny version af udvidelsen (hæv `CFBundleVersion`) kræver typisk en genstart af Mac'en, før den nye kører. Ændringer kun i appen kræver ingen genstart.
+  - Brug ikke `CALayer.render(in:)` til kamerabaggrunden. Den laver en offscreen-buffer for hvert lag med gennemsigtighed (~900 ms for ~260 snefnug). `ScreenOverlay.renderSceneImage()` tegner lagtræet selv (~10 ms). `CARenderer` gav kun magenta på macOS 27.
+  - Vision-masken er 512×384 (4:3), mens kameraet er 1920×1080 (16:9). Stræk masken til kamerabilledet, og flyt begge med samme transformation. Beregn masken for hvert billede, ellers halter kanten.
+  - `timeout` findes ikke på macOS. Kør `log stream` i baggrunden og stop den med `kill`.
 - Lyd (kun macOS) syntetiseres i `Sound.swift` — stadig ingen lydfiler. Lyd skal altid være slået fra som standard.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

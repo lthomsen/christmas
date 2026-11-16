@@ -34,7 +34,7 @@ if args.contains("--unregister-login") { Controller.setAutostart(false); exit(0)
 // restarts it if it crashes (after 5 s; it gives up after 3 crashes within a minute of each start).
 // A normal quit ("Afslut") exits with 0, and then the watchdog quits too.
 let isChild = ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil
-let testFlags = ["--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
+let testFlags = ["--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
 let wantsSupervisor = !isChild && ProcessInfo.processInfo.environment["JULE_NO_SUPERVISOR"] == nil
     && !args.dropFirst().contains(where: { a in testFlags.contains(where: { a.hasPrefix($0) }) })
 if wantsSupervisor {
@@ -84,6 +84,9 @@ for a in args {
         let parts = a.dropFirst(11).split(separator: ",")
         if let dir = parts.first { controller.snapshot = (String(dir), parts.count > 1 ? Double(parts[1]) ?? 5 : 5) }
     }
+    else if a.hasPrefix("--kamera-scene-test=") { controller.testVirtualScene(dir: String(a.dropFirst(20))) }
+    // --installer-kamera submits the camera extension activation (replaces an older version)
+    else if a == "--installer-kamera" { DispatchQueue.main.async { controller.installCamera() } }
     else if a == "--skærmskift-test" { controller.startDisplayChangeTest() }
     else if a == "--julemand" { DispatchQueue.main.async { controller.launchSanta() } }
     else if a.hasPrefix("--effekt="), let n = Int(a.dropFirst(9)) { DispatchQueue.main.async { controller.triggerEffect(n) } }

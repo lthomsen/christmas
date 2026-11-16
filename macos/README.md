@@ -33,6 +33,16 @@ Installér i `~/Applications` med start ved login (login-emnet peger på den ins
 ```
 Appen er ad-hoc-signeret; til distribution kræves Developer ID-signering og notarisering.
 
+## JuleHygge Kamera (baggrund i Teams)
+Et virtuelt kamera, der viser dig foran en levende julescene: nattehimmel, snevejr, julelys, nisser, snemand og julemanden en gang imellem. Vælg "JuleHygge Kamera" som kamera i Teams, og slå Teams' egen baggrund fra.
+
+- `CameraExtension/` er en CoreMediaIO-kameraudvidelse, der kun videresender billeder. Den har en sink-strøm (ind fra appen) og en kilde-strøm (ud til Teams). Når der ikke kommer billeder, viser den et roligt snefnug.
+- Appen gør arbejdet (`VirtualCamera.swift`), men kun mens en app læser kameraet. Udvidelsen melder det via en egen egenskab (`jhsr`). Appen læser det rigtige kamera, skærer personen fri med Vision og tegner julescenen på en virtuel "tredje skærm" (`ScreenOverlay(virtualFor:)`, 1280×720, uden vindue). Derefter lægger den personen ovenpå og sender billedet til udvidelsen.
+- Kræver Xcode-projektet (`JuleHygge.xcodeproj`, genereres af `tools/make-xcodeproj.py`) og signering med teamets Apple Development-certifikat. Byg og installér i `/Applications` med `./xcbuild.sh`, og vælg derefter **Installér JuleHygge Kamera** i menuen og godkend udvidelsen i Systemindstillinger.
+- Engangsforudsætning: Mac'en skal være registreret som enhed på teamet. Åbn projektet i Xcode > Signing & Capabilities > "Register Device", eller tilføj Mac'ens Provisioning UDID på developer.apple.com.
+- Ydelse mens kameraet bruges (målt): cirka 27 billeder/s ud, julescenen tegnes på cirka 10 ms (20 gange/s), udskæring på cirka 32 ms pr. billede, og appen bruger cirka 50 % CPU. Skærm-overlayet holder pause imens. Appen skriver `perf:`-linjer i systemloggen (`log show --predicate 'subsystem == "dk.julehygge.JuleHygge"'`).
+- `--kamera-scene-test=MAPPE` gemmer kamerabaggrunden som PNG uden kamera.
+
 ## Test
 
 | Parameter / miljøvariabel | Effekt |

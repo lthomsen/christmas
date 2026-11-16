@@ -5,6 +5,7 @@ import Foundation
 final class Settings {
     var snow = true, snowGround = true, santa = true, nisser = true, lights = true,
         pauseFullscreen = true, snowman = true, allScreens = true, plow = true,
+        cameraPausesScreens = true,
         sound = false, plowSound = false   // lyd er slået fra, indtil man selv slår den til
     var snowLevel = 1          // 0 = let, 1 = normal, 2 = snestorm
     var nisseCount = 3         // pr. skærm
@@ -48,6 +49,7 @@ final class Settings {
         s.allScreens = b("AllScreens", s.allScreens)
         s.plow = b("Plow", s.plow)
         s.sound = b("Sound", s.sound)
+        s.cameraPausesScreens = b("CameraPausesScreens", s.cameraPausesScreens)
         s.plowSound = b("PlowSound", s.plowSound)
         s.soundLevel = max(0, min(2, i("SoundLevel", s.soundLevel)))
         s.snowLevel = max(0, min(2, i("SnowLevel", s.snowLevel)))
@@ -71,7 +73,7 @@ final class Settings {
         let lines = [
             "Snow=" + b(snow), "SnowGround=" + b(snowGround), "Santa=" + b(santa),
             "Nisser=" + b(nisser), "Lights=" + b(lights), "PauseFullscreen=" + b(pauseFullscreen),
-            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "Sound=" + b(sound), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
+            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "Sound=" + b(sound), "CameraPausesScreens=" + b(cameraPausesScreens), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
             "SnowLevel=\(snowLevel)", "NisseCount=\(nisseCount)", "PowerSave=\(powerSave)", "FrameRate=\(frameRate)",
             "SnowmanSeenStage=\(snowmanSeenStage)", "CalendarYear=\(calendarYear)",
             "FirstRun=" + ds(firstRun), "LastDoorNotice=" + ds(lastDoorNotice),

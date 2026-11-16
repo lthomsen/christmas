@@ -27,6 +27,11 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         "knapper", "arme af grene", "et smil", "et rødt halstørklæde", "en høj hat", "en kost - snemanden er færdig!"]
 
     private var overlays: [ScreenOverlay] = []
+    /// The offscreen "third screen" behind the user in the virtual camera; only exists while the camera is in use.
+    private var virtualScene: ScreenOverlay?
+    private(set) lazy var camera = VirtualCamera(controller: self)
+    private let cameraInstaller = CameraInstaller()
+    func installCamera() { cameraInstaller.install() }
     private var link: CADisplayLink?
     private var lastTick: CFTimeInterval = 0
     private var tickCount = 0, tickWindow: CFTimeInterval = 0
@@ -87,6 +92,8 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private var desiredFps: Double {
         if let f = Double(ProcessInfo.processInfo.environment["JULE_FPS"] ?? "") { return f }
         let calm = Double(powerSave ? min(cfg.frameRate, 12) : cfg.frameRate)
+        // the camera background is small and blended with the camera: 20 fps is plenty, also while Santa flies
+        if camera.active && cfg.cameraPausesScreens { return min(max(calm, 20), 20) }
         // Santa (and his sparks/star showers) moves fast and needs 60 fps to look fluent.
         if santaActive || !sparks.isEmpty { return max(calm, powerSave ? 30 : 60) }
         // The plow is slow (~175 pt/s), so 30 fps is smooth enough and costs about half as much.
@@ -148,6 +155,35 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         RunLoop.main.add(t, forMode: .common)
     }
 
+    /// Test aid (--kamera-scene-test=DIR): runs the virtual camera background without a camera and saves it as PNG.
+    func testVirtualScene(dir: String) {
+        let v = ScreenOverlay(virtualFor: self, width: F(VirtualCamera.width), height: F(VirtualCamera.height))
+        virtualScene = v
+        overlays.append(v)
+        santaNext = 2
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            if let img = v.renderSceneImage() {
+                try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: dir).appendingPathComponent("kamera-baggrund.png"))
+            }
+        }
+    }
+
+    /// Creates or removes the virtual screen when the camera starts or stops being used.
+    func virtualSceneChanged() {
+        if camera.wantsScene, virtualScene == nil {
+            let v = ScreenOverlay(virtualFor: self, width: F(VirtualCamera.width), height: F(VirtualCamera.height))
+            virtualScene = v
+            overlays.append(v)
+            santaNext = min(santaNext, 8)   // let Santa visit the meeting early on
+        } else if !camera.wantsScene, let v = virtualScene {
+            overlays.removeAll { $0 === v }
+            v.close()
+            virtualScene = nil
+        }
+    }
+
     /// The screen directly to the left (dir < 0) or right (dir > 0) of `o`, edge to edge, if any.
     func neighbor(of o: ScreenOverlay, dir: F) -> ScreenOverlay? {
         overlays.first { other in
@@ -176,6 +212,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             if !cfg.allScreens && s.frame.origin != .zero { continue }
             overlays.append(ScreenOverlay(controller: self, screen: s))
         }
+        if let v = virtualScene { overlays.append(v) }
         santaActive = false
         plow.active = false
     }
@@ -209,8 +246,12 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        // While JuleHygge Kamera is in use the desktop overlay pauses, so only the camera picture is computed.
+        let screensSuspended = camera.active && cfg.cameraPausesScreens
+        for o in overlays where !o.isVirtual { o.setSuspended(screensSuspended) }
         for o in overlays { o.frame(dt) }
         CATransaction.commit()
+        camera.tick(dt, scene: virtualScene)
         if desiredFps != currentFps && !asleep { startTimer() }
         if let s = snapshot, time >= s.at { snapshot = nil; writeSnapshots(to: s.dir) }
     }
@@ -583,6 +624,10 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(choice("Billedfrekvens",
                             ["12 billeder/s - mindst strøm", "20 billeder/s - normal", "30 billeder/s - glattere sne", "60 billeder/s - helt glat, mest strøm"],
                             [12, 20, 30, 60], { $0.frameRate }, { [unowned self] in $0.frameRate = $1; startTimer() }))
+        menu.addItem(item("Installér JuleHygge Kamera (baggrund i Teams)…") { [unowned self] _ in cameraInstaller.install() })
+        menu.addItem(toggle("Pause skærmene mens JuleHygge Kamera bruges", { $0.cameraPausesScreens }, { $0.cameraPausesScreens = $1 }))
+        menu.addItem(item("Fjern JuleHygge Kamera") { [unowned self] _ in cameraInstaller.remove() })
+        menu.addItem(.separator())
         menu.addItem(toggle("Julelys", { $0.lights }, { $0.lights = $1 }))
         menu.addItem(toggle("Vis på alle skærme", { $0.allScreens }, { [unowned self] in $0.allScreens = $1; buildOverlays() }))
         menu.addItem(toggle("Pause ved fuldskærm (spil/film)", { $0.pauseFullscreen }, { $0.pauseFullscreen = $1 }))
@@ -640,6 +685,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     }
 
     private func exit() {
+        camera.stop()
         audio.stopAll()
         stopTicker()
         calendarWindow?.close()
