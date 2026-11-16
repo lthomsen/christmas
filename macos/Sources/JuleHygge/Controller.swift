@@ -687,6 +687,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         plowCameraItem = item("Send sneploven ind i kameraet") { [unowned self] _ in sendPlowToCamera() }
         menu.addItem(santaCameraItem)
         menu.addItem(plowCameraItem)
+        menu.addItem(toggle("Nissehue på i kameraet", { $0.cameraHat }, { $0.cameraHat = $1 }))
         menu.addItem(item("Installér JuleHygge Kamera (baggrund i Teams)…") { [unowned self] _ in cameraInstaller.install() })
         menu.addItem(toggle("Pause skærmene mens JuleHygge Kamera bruges", { $0.cameraPausesScreens }, { $0.cameraPausesScreens = $1 }))
         menu.addItem(item("Fjern JuleHygge Kamera") { [unowned self] _ in cameraInstaller.remove() })

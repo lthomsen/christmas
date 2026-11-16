@@ -52,6 +52,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Lyd (kun macOS) syntetiseres i `Sound.swift` — stadig ingen lydfiler. Lyd skal altid være slået fra som standard.
 - Alt, der er "på vej" (julemanden, sneploven, deres lyd), skal afsluttes i `finishRuns()`, når overlayet stopper (pauseskærm, skærmsøvn, lås). Ellers hænger turen, når timeren står stille, og melodien looper (rettet 2026-11-16).
 - Sne på vinduer (`WindowSnow.swift`): bunkerne ligger i globale koordinater i `Controller.ledges` og tegnes af hvert overlay, de krydser. Sneen hører til vinduets sidst stillestående placering (`settled`): under minimering krymper vinduet ind i Dock'en, og sneen skal falde fra det oprindelige sted. Tegn kun strækninger, hvor der faktisk ligger sne (ellers ses en tynd hvid streg på bare kanter).
+- Nissehuen (`Hat.swift`): placér den ud fra hovedets omrids i udskæringsmasken, ikke kun ud fra ansigtsrammen. Ansigtet sidder foran hovedets midte, så et gæt ud fra rammen rammer forkert, når hovedet drejes. Mål størrelsen ud fra rammens højde (bredden skrumper, når hovedet drejes). Ved test på et skærmbillede tæller en allerede tegnet hue med i masken.
 - `measure.sh` måler den nyeste JuleHygge-proces; den anden er vagtprocessen.
 - Test-appen skal køre som `.app` (`build/JuleHygge.app`, ikke `.build/release/JuleHygge`), ellers crasher UserNotifications. Brug `JULE_LOG` og `JULE_SETTINGS` med stier i projektet.
 - Se `macos/README.md` for testparametre og `docs/macos-plan.md` for designvalg.

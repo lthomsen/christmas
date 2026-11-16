@@ -33,8 +33,14 @@ if args.contains("--unregister-login") { Controller.setAutostart(false); exit(0)
 // Supervisor: the app first starts as a small watchdog that runs the real app as a child process and
 // restarts it if it crashes (after 5 s; it gives up after 3 crashes within a minute of each start).
 // A normal quit ("Afslut") exits with 0, and then the watchdog quits too.
+// --nissehue-test=DIR[,IMAGE]: draws the camera's nisse hat (and puts it on the face in IMAGE) and quits.
+if let a = args.first(where: { $0.hasPrefix("--nissehue-test=") }) {
+    let parts = a.dropFirst(16).split(separator: ",", maxSplits: 1).map(String.init)
+    NisseHat.test(dir: parts[0], image: parts.count > 1 ? parts[1] : nil)
+    exit(0)
+}
 let isChild = ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil
-let testFlags = ["--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
+let testFlags = ["--nissehue-test", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
 let wantsSupervisor = !isChild && ProcessInfo.processInfo.environment["JULE_NO_SUPERVISOR"] == nil
     && !args.dropFirst().contains(where: { a in testFlags.contains(where: { a.hasPrefix($0) }) })
 if wantsSupervisor {
