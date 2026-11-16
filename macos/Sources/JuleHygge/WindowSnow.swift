@@ -13,6 +13,10 @@ final class Ledge {
     var settled: CGRect
     /// Snow height per `step` points from the window's left edge.
     var cols: [F]
+    /// How far the snow hangs down over the edge (in front of the window), per column. It creeps out slowly
+    /// once the pile is deep, in uneven lobes (`lobes`, fixed per window) and a little more around the corners.
+    var hang: [F]
+    private(set) var lobes: [F] = []
     /// Parts of the top edge (global x) not covered by a window in front.
     var visible: [(F, F)] = []
     /// True while the window is being moved or resized: the pile is hidden and catches nothing until it settles.
@@ -24,6 +28,23 @@ final class Ledge {
     init(id: Int, rect: CGRect) {
         self.id = id; self.rect = rect; self.settled = rect
         cols = Array(repeating: 0, count: Int(rect.width / Ledge.step) + 1)
+        hang = cols
+        makeLobes()
+    }
+
+    /// Uneven drapes: two slow waves with a phase from the window number, sharpened so some places hang
+    /// well down and others hardly at all.
+    private func makeLobes() {
+        let p1 = F(id % 97) * 0.61, p2 = F(id % 89) * 1.37
+        lobes = (0..<cols.count).map { i in
+            let v = 0.5 + 0.5 * (0.6 * sin(F(i) * 0.23 + p1) + 0.4 * sin(F(i) * 0.57 + p2))
+            return pow(max(0, min(1, v)), 2.2)
+        }
+    }
+
+    func hang(at x: F) -> F {
+        let i = Int((x - settled.minX) / Ledge.step)
+        return i >= 0 && i < hang.count ? hang[i] : 0
     }
 
     func isVisible(_ x: F) -> Bool { visible.contains { x >= $0.0 && x <= $0.1 } }
@@ -44,7 +65,9 @@ final class Ledge {
     /// Keeps the width in step with the window, keeping the snow that is still on it.
     func resize(to width: F) {
         let n = Int(width / Ledge.step) + 1
-        if n < cols.count { cols.removeLast(cols.count - n) } else if n > cols.count { cols += Array(repeating: 0, count: n - cols.count) }
+        if n < cols.count { cols.removeLast(cols.count - n); hang.removeLast(hang.count - n) }
+        else if n > cols.count { cols += Array(repeating: 0, count: n - cols.count); hang += Array(repeating: 0, count: n - hang.count) }
+        makeLobes()
     }
 }
 
@@ -127,7 +150,8 @@ extension Controller {
 
     /// The window went away: its snow falls as clumps.
     private func dropSnow(from l: Ledge) {
-        for (i, h) in l.cols.enumerated() where h > 0.5 {
+        for (i, h0) in l.cols.enumerated() where h0 + l.hang[i] > 0.5 {
+            let h = h0 + l.hang[i]
             let n = min(4, Int(h / 2.5) + 1)
             for _ in 0..<n where clumps.count < 700 {
                 let c = SnowClump()
@@ -150,10 +174,22 @@ extension Controller {
         if ProcessInfo.processInfo.environment["JULE_DEBUG"] == "1", Int(time / 5) != Int((time - Double(dt)) / 5) {
             ErrorLog.debug("ledges: " + ledgeList.map { "\($0.id) \(Int($0.settled.minX)),\(Int($0.settled.minY)) w\(Int($0.settled.width)) vis\($0.visible.count) mov\($0.moving) max\(String(format: "%.1f", $0.cols.max() ?? 0))" }.joined(separator: " | "))
         }
-        let maxH: F = 10, slope: F = 1.4
+        // in a snowstorm the wind pushes the snow along the edge, so it drifts up against the downwind end
+        let storm = effectiveSnowLevel == 2 && !melt
+        let windNorm = max(-1.5, min(1.5, wind / 140))
+        let maxH: F = storm ? 14 : 10, slope: F = 1.4
         for l in ledgeList where l.hasSnow {
             var any = false
             let n = l.cols.count
+            if storm && abs(windNorm) > 0.15 && n > 2 {
+                let rate = 0.03 * abs(windNorm) * dt, dir = windNorm > 0 ? 1 : -1
+                let moved = l.cols.map { $0 * rate }
+                for i in 0..<n {
+                    let j = i + dir
+                    if j < 0 || j >= n { continue }   // the end column keeps what reaches it: the drift
+                    l.cols[i] -= moved[i]; l.cols[j] += moved[i]
+                }
+            }
             for i in 0..<(n - 1) {
                 let d = l.cols[i] - l.cols[i + 1]
                 if d > slope { let m = (d - slope) * 0.3; l.cols[i] -= m; l.cols[i + 1] += m }
@@ -161,12 +197,32 @@ extension Controller {
             }
             for i in 0..<n {
                 let edge = F(min(i, n - 1 - i)) * Ledge.step
-                let cap = min(maxH, max(0, edge - 6) * 0.5)   // snow rounds off toward the window's corners
+                // snow rounds off toward the window's corners; in a storm the downwind end builds a steeper drift
+                let downwindEnd = storm && ((windNorm > 0.15 && i > n / 2) || (windNorm < -0.15 && i < n / 2))
+                // a full pile keeps soft bumps on top: the height limit itself wavers along the edge
+                let bumps = 0.72 + 0.28 * F(sin(Double(i) * 0.41 + Double(l.id % 53)) * 0.6 + sin(Double(i) * 0.97 + Double(l.id % 31)) * 0.4)
+                let cap = min(maxH * bumps, max(0, edge - (downwindEnd ? 2 : 6)) * (downwindEnd ? 1.0 : 0.5))
                 if melt { l.cols[i] = max(0, l.cols[i] - 3 * dt) }
-                if l.cols[i] > cap { l.cols[i] = cap }
+                // above the cap it settles back slowly (a drift sinks after the storm instead of being cut off)
+                if l.cols[i] > cap { l.cols[i] = max(cap, l.cols[i] - max(2 * dt, l.cols[i] - cap - 6)) }
                 if l.cols[i] > 0.3 { any = true }
             }
-            if melt || !any { l.version += 1 }
+            // the drape: once the pile is deeper than ~3 pt it creeps over the edge (≈0.7 pt/s), as far as the
+            // lobes allow, a bit further near the corners where the snow rounds over; it melts back quicker
+            var hangChanged: F = 0
+            for i in 0..<n {
+                var s: F = 0, k = 0
+                for j in max(0, i - 3)...min(n - 1, i + 3) { s += l.cols[j]; k += 1 }
+                let pile = s / F(k)
+                let edge = F(min(i, n - 1 - i)) * Ledge.step
+                let corner: F = edge < 24 ? 1 + (24 - edge) / 24 * 0.6 : 1
+                let target = melt ? 0 : max(0, pile - 3) * 2.6 * (0.12 + 0.88 * l.lobes[i]) * corner
+                let old = l.hang[i]
+                if target > old { l.hang[i] = min(target, old + 0.7 * dt) } else { l.hang[i] = max(target, old - 3 * dt) }
+                hangChanged += abs(l.hang[i] - old)
+                if l.hang[i] > 0.3 { any = true }
+            }
+            if melt || !any || hangChanged > 0.5 { l.version += 1 }
             l.hasSnow = any
         }
         if !clumps.isEmpty {

@@ -408,7 +408,20 @@ final class ScreenOverlay {
             k -= 1
         }
 
-        let maxH = 18 * S, slope = 1.2 * S
+        // Snowstorm: the wind carries snow along the pile, so it drifts up against the downwind screen edge,
+        // and flakes settle in long soft waves (`dune` in deposit). Drifts may grow taller and sink back slowly afterwards.
+        let storm = c.effectiveSnowLevel == 2 && c.snowOn && !isVirtual
+        let windNorm = max(-1.5, min(1.5, c.wind / 140))
+        if storm && abs(windNorm) > 0.15 && heap.count > 2 {
+            let rate = 0.02 * abs(windNorm) * dt, dir = windNorm > 0 ? 1 : -1
+            let moved = heap.map { $0 * rate }
+            for i in 0..<heap.count {
+                let j = i + dir
+                if j < 0 || j >= heap.count { continue }
+                heap[i] -= moved[i]; heap[j] += moved[i]
+            }
+        }
+        let maxH = (storm ? 30 : 18) * S, slope = 1.2 * S
         for i in 0..<(heap.count - 1) {
             let d = heap[i] - heap[i + 1]
             if d > slope { let m = (d - slope) * 0.3; heap[i] -= m; heap[i + 1] += m }
@@ -427,7 +440,10 @@ final class ScreenOverlay {
         let melt = !c.snowOn || !cfg.snowGround
         for i in 0..<heap.count {
             if melt { heap[i] = max(0, heap[i] - 3 * S * dt) }
-            if heap[i] > maxH { heap[i] = maxH }
+            // a full pile keeps soft bumps: the limit wavers along the screen (in global x, so screens line up)
+            let gx = Double(F(i) * heapStep + screenBounds.minX)
+            let lim = maxH * (0.78 + 0.22 * F(0.6 * sin(gx / 37) + 0.4 * sin(gx / 13.7)))
+            if heap[i] > lim { heap[i] = max(lim, heap[i] - 2 * S * dt) }
         }
     }
 
@@ -478,7 +494,13 @@ final class ScreenOverlay {
 
     private func deposit(_ x: F, _ r: F) {
         let idx = Int(x / heapStep)
-        let amount = 0.35 * r
+        var amount = 0.35 * r
+        if c.effectiveSnowLevel == 2 && !isVirtual {
+            // dunes: long waves in global x (so they line up across screens), slowly wandering with the wind
+            let gx = x + screenBounds.minX
+            let dune = 0.5 + 0.5 * sin(Double(gx / (240 * S)) * 2 * .pi - c.time * 0.03 * Double(c.wind > 0 ? 1 : -1))
+            amount *= 0.3 + 1.4 * F(dune)
+        }
         for k in -1...1 {
             let j = idx + k
             if j >= 0 && j < heap.count { heap[j] += k == 0 ? amount : amount * 0.5 }
@@ -524,32 +546,53 @@ final class ScreenOverlay {
             for (a, b) in l.visible {
                 let x0 = max(a, ox), x1 = min(b, ox + W)
                 if x1 - x0 < 4 { continue }
-                // only the stretches where snow has actually landed: a bare edge draws nothing (no thin white line)
-                var run: [CGPoint] = []
+                // only the stretches where snow has actually landed: a bare edge draws nothing (no thin white line).
+                // Each stretch: the pile's top from left to right, then back along the drape hanging below the edge.
+                var run: [(x: CGFloat, h: CGFloat, d: CGFloat)] = []
                 func flush() {
                     if run.count >= 2 {
-                        fill.move(to: CGPoint(x: run[0].x, y: base - 0.5))
-                        for p in run { fill.addLine(to: p) }
-                        fill.addLine(to: CGPoint(x: run[run.count - 1].x, y: base - 0.5))
+                        let top = run.map { CGPoint(x: $0.x, y: base + $0.h) }
+                        fill.move(to: top[0])
+                        for i in 1..<top.count {
+                            let mid = CGPoint(x: (top[i - 1].x + top[i].x) / 2, y: (top[i - 1].y + top[i].y) / 2)
+                            fill.addQuadCurve(to: mid, control: top[i - 1])
+                        }
+                        // the drape's lower edge, rounded through the midpoints so the lobes look soft
+                        let low = run.reversed().map { CGPoint(x: $0.x, y: base - 0.5 - $0.d) }
+                        // round over the end: from the pile's end down to the drape's end in a curve
+                        fill.addQuadCurve(to: low[0], control: CGPoint(x: low[0].x + Ledge.step * 0.8, y: base))
+                        for i in 1..<low.count {
+                            let mid = CGPoint(x: (low[i - 1].x + low[i].x) / 2, y: (low[i - 1].y + low[i].y) / 2)
+                            fill.addQuadCurve(to: mid, control: low[i - 1])
+                        }
+                        fill.addQuadCurve(to: top[0], control: CGPoint(x: low[low.count - 1].x - Ledge.step * 0.8, y: base))
                         fill.closeSubpath()
-                        line.addLines(between: run)
+                        line.addLines(between: top)
+                        // a faint outline under the drape where it hangs down, for depth
+                        if run.contains(where: { $0.d > 1 }) {
+                            line.move(to: low[0])
+                            for i in 1..<low.count {
+                                let mid = CGPoint(x: (low[i - 1].x + low[i].x) / 2, y: (low[i - 1].y + low[i].y) / 2)
+                                line.addQuadCurve(to: mid, control: low[i - 1])
+                            }
+                        }
                     }
                     run.removeAll()
                 }
                 var x = x0
                 while x <= x1 {
-                    let h = l.height(at: x)
-                    if h > 0.6 {
+                    let h = l.height(at: x), d = l.hang(at: x)
+                    if h > 0.6 || d > 0.6 {
                         // start and end each stretch on the edge itself, so the pile tapers off
-                        if run.isEmpty { run.append(CGPoint(x: max(x0, x - Ledge.step) - ox, y: base)) }
-                        run.append(CGPoint(x: x - ox, y: base + h))
+                        if run.isEmpty { run.append((max(x0, x - Ledge.step) - ox, 0, 0)) }
+                        run.append((x - ox, h, d))
                     } else if !run.isEmpty {
-                        run.append(CGPoint(x: x - ox, y: base))
+                        run.append((x - ox, 0, 0))
                         flush()
                     }
                     x += Ledge.step
                 }
-                if !run.isEmpty { run.append(CGPoint(x: min(x1, x) - ox, y: base)); flush() }
+                if !run.isEmpty { run.append((min(x1, x) - ox, 0, 0)); flush() }
             }
             e.fill.path = fill
             e.line.path = line
