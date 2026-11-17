@@ -173,6 +173,9 @@ extension Controller {
     private func breakOff(_ l: Ledge, _ dt: F) {
         let n = l.cols.count
         guard n > 8 else { return }
+        // cheap checks first: the scan for the heaviest stretch only runs on the rare frames something breaks off
+        let full = l.hang.max() ?? 0 > 9 || (l.cols.max() ?? 0) > (effectiveSnowLevel == 2 ? 12.5 : 9)
+        guard full, R() < dt / 15 else { return }
         var best = -1, bestLoad: F = 0
         for i in 0..<n {
             let x = l.settled.minX + F(i) * Ledge.step
@@ -180,10 +183,11 @@ extension Controller {
             let load = l.hang[i] + l.cols[i] * 0.5
             if load > bestLoad { bestLoad = load; best = i }
         }
-        let full = l.hang.max() ?? 0 > 9 || (l.cols.max() ?? 0) > (effectiveSnowLevel == 2 ? 12.5 : 9)
-        guard best >= 0, full, R() < dt / 15 else { return }
+        guard best >= 0 else { return }
         let half = 2 + Int(R() * 5)            // 5–13 columns ≈ 20–50 pt
         for j in max(0, best - half)...min(n - 1, best + half) {
+            // parts of the edge hidden behind a window in front stay put (their clumps would fall in front of it)
+            guard l.isVisible(l.settled.minX + F(j) * Ledge.step) else { continue }
             let k = 1 - F(abs(j - best)) / F(half + 1)       // 1 in the middle, tapering toward the ends
             let fall = 0.5 + 0.5 * cos((1 - k) * .pi)          // soft edges of the break
             let dropPile = l.cols[j] * 0.65 * fall, dropHang = l.hang[j] * fall
