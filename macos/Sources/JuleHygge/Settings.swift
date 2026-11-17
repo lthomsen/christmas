@@ -5,7 +5,7 @@ import Foundation
 final class Settings {
     var snow = true, snowGround = true, santa = true, nisser = true, lights = true,
         pauseFullscreen = true, snowman = true, allScreens = true, plow = true,
-        cameraPausesScreens = true, windowSnow = true, cameraHat = true,
+        cameraPausesScreens = true, windowSnow = true, cameraHat = true, cameraFront = true, cameraBeard = true, cameraSuit = true,
         sound = false, plowSound = false   // lyd er slået fra, indtil man selv slår den til
     var snowLevel = 1          // 0 = let, 1 = normal, 2 = snestorm
     var nisseCount = 3         // pr. skærm
@@ -50,6 +50,9 @@ final class Settings {
         s.plow = b("Plow", s.plow)
         s.windowSnow = b("WindowSnow", s.windowSnow)
         s.cameraHat = b("CameraHat", s.cameraHat)
+        s.cameraFront = b("CameraFront", s.cameraFront)
+        s.cameraBeard = b("CameraBeard", s.cameraBeard)
+        s.cameraSuit = b("CameraSuit", s.cameraSuit)
         s.sound = b("Sound", s.sound)
         s.cameraPausesScreens = b("CameraPausesScreens", s.cameraPausesScreens)
         s.plowSound = b("PlowSound", s.plowSound)
@@ -75,7 +78,7 @@ final class Settings {
         let lines = [
             "Snow=" + b(snow), "SnowGround=" + b(snowGround), "Santa=" + b(santa),
             "Nisser=" + b(nisser), "Lights=" + b(lights), "PauseFullscreen=" + b(pauseFullscreen),
-            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "WindowSnow=" + b(windowSnow), "CameraHat=" + b(cameraHat), "Sound=" + b(sound), "CameraPausesScreens=" + b(cameraPausesScreens), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
+            "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "WindowSnow=" + b(windowSnow), "CameraHat=" + b(cameraHat), "CameraFront=" + b(cameraFront), "CameraBeard=" + b(cameraBeard), "CameraSuit=" + b(cameraSuit), "Sound=" + b(sound), "CameraPausesScreens=" + b(cameraPausesScreens), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
             "SnowLevel=\(snowLevel)", "NisseCount=\(nisseCount)", "PowerSave=\(powerSave)", "FrameRate=\(frameRate)",
             "SnowmanSeenStage=\(snowmanSeenStage)", "CalendarYear=\(calendarYear)",
             "FirstRun=" + ds(firstRun), "LastDoorNotice=" + ds(lastDoorNotice),

@@ -193,10 +193,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.sendSantaToCamera(); self?.sendPlowToCamera() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            if let img = v.renderSceneImage() {
+            func save(_ img: CGImage?, _ name: String) {
+                guard let img else { return }
                 try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?
-                    .write(to: URL(fileURLWithPath: dir).appendingPathComponent("kamera-baggrund.png"))
+                    .write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
             }
+            save(v.renderSceneImage(), "kamera-baggrund.png")
+            let (back, front) = v.renderSceneImages()
+            save(back, "kamera-bag-personen.png"); save(front, "kamera-foran-personen.png")
         }
     }
 
@@ -337,8 +341,10 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         // ordinary trips go over the real screens; the camera scene only gets Santa when sent there
         guard let target = screen ?? overlays.filter({ !$0.isVirtual }).randomElement() else { return }
         let b = target.screenBounds
-        santaScale = target.S
-        santaY0 = b.minY + b.height * (0.12 + R() * 0.25)
+        // In the camera picture Santa is smaller and flies in a band where the whole sleigh (with its bobbing)
+        // stays inside the picture; on the desktop anywhere in the upper part of the screen.
+        santaScale = target.isVirtual ? 0.85 : target.S
+        santaY0 = b.minY + b.height * (target.isVirtual ? 0.25 + R() * 0.06 : 0.12 + R() * 0.25)
         // fly over every real screen at the same height (the camera scene is a world of its own)
         santaMinX = b.minX; santaMaxX = b.maxX
         if !target.isVirtual {
@@ -688,6 +694,9 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(santaCameraItem)
         menu.addItem(plowCameraItem)
         menu.addItem(toggle("Nissehue på i kameraet", { $0.cameraHat }, { $0.cameraHat = $1 }))
+        menu.addItem(toggle("Nisseskæg i kameraet", { $0.cameraBeard }, { $0.cameraBeard = $1 }))
+        menu.addItem(toggle("Nissedragt i kameraet", { $0.cameraSuit }, { $0.cameraSuit = $1 }))
+        menu.addItem(toggle("Nisser og sne foran mig i kameraet", { $0.cameraFront }, { $0.cameraFront = $1 }))
         menu.addItem(item("Installér JuleHygge Kamera (baggrund i Teams)…") { [unowned self] _ in cameraInstaller.install() })
         menu.addItem(toggle("Pause skærmene mens JuleHygge Kamera bruges", { $0.cameraPausesScreens }, { $0.cameraPausesScreens = $1 }))
         menu.addItem(item("Fjern JuleHygge Kamera") { [unowned self] _ in cameraInstaller.remove() })

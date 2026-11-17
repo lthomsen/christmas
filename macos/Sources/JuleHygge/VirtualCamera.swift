@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreImage
 import CoreMediaIO
@@ -37,10 +38,13 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }()
     /// The virtual nisse hat (Hat.swift); only used on videoQueue.
     private let hat = NisseHat()
+    /// Nisse beard and suit (Costume.swift); only used on videoQueue.
+    private let costume = NisseCostume()
     private var lastFrameTime = CACurrentMediaTime()
     private var statFace = 0.0
     private let lock = NSLock()
     private var background: CIImage?       // latest rendered Christmas scene (written on main, read on videoQueue)
+    private var foreground: CIImage?       // what stands in front of the person: snow pile, nisser, plow (or nil)
     private(set) var active = false
     private var pollTimer: F = 0
     private var frameCount = 0
@@ -68,9 +72,10 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         guard active, let scene else { return }
         let t0 = CACurrentMediaTime()
         autoreleasepool {
-            let img = scene.renderSceneImage()
+            var back: CGImage?, front: CGImage?
+            if c.cfg.cameraFront { (back, front) = scene.renderSceneImages() } else { back = scene.renderSceneImage() }
             statBg += CACurrentMediaTime() - t0; statBgN += 1
-            lock.lock(); background = img.map { CIImage(cgImage: $0) }; lock.unlock()
+            lock.lock(); background = back.map { CIImage(cgImage: $0) }; foreground = front.map { CIImage(cgImage: $0) }; lock.unlock()
         }
     }
 
@@ -91,7 +96,7 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         session?.stopRunning()
         session = nil
         sink.stopSink()
-        lock.lock(); background = nil; lock.unlock()
+        lock.lock(); background = nil; foreground = nil; lock.unlock()
         c.virtualSceneChanged()
         ErrorLog.debug("virtual camera: stopped")
     }
@@ -153,7 +158,7 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     private func processFrame(_ sampleBuffer: CMSampleBuffer) {
         guard let camera = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        lock.lock(); let bg = background; lock.unlock()
+        lock.lock(); let bg = background, fg = foreground; lock.unlock()
         frameCount += 1
         guard let bg else { if frameCount % 60 == 1 { camLog.info("frame without background") }; return }
         let t0 = CACurrentMediaTime()
@@ -162,16 +167,16 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             let now = CACurrentMediaTime()
             if now - statSince >= 2 {
                 let n = Double(max(1, statFrameN)), nb = Double(max(1, statBgN)), ns = Double(max(1, statSegN))
-                camLog.info("perf: \(String(format: "%.1f", Double(self.statFrameN) / (now - self.statSince)), privacy: .public) fps ud | billede \(String(format: "%.1f", self.statFrame / n * 1000), privacy: .public) ms (heraf udskæring \(String(format: "%.1f", self.statSeg / ns * 1000), privacy: .public) ms, nissehue \(String(format: "%.1f", self.statFace / ns * 1000), privacy: .public) ms) | julescene \(String(format: "%.1f", self.statBg / nb * 1000), privacy: .public) ms × \(self.statBgN)")
+                camLog.info("perf: \(String(format: "%.1f", Double(self.statFrameN) / (now - self.statSince)), privacy: .public) fps ud | billede \(String(format: "%.1f", self.statFrame / n * 1000), privacy: .public) ms (heraf udskæring \(String(format: "%.1f", self.statSeg / ns * 1000), privacy: .public) ms, hue+skæg+dragt \(String(format: "%.1f", self.statFace / ns * 1000), privacy: .public) ms) | julescene \(String(format: "%.1f", self.statBg / nb * 1000), privacy: .public) ms × \(self.statBgN)")
                 statSince = now; statFrame = 0; statFrameN = 0; statSeg = 0; statSegN = 0; statFace = 0; statBg = 0; statBgN = 0
             }
         }
-        guard let out = composite(camera: camera, background: bg), let sb = makeSampleBuffer(out) else { if frameCount % 60 == 1 { camLog.error("composite failed") }; return }
+        guard let out = composite(camera: camera, background: bg, foreground: fg), let sb = makeSampleBuffer(out) else { if frameCount % 60 == 1 { camLog.error("composite failed") }; return }
         let ok = sink.enqueue(sb)
         if frameCount % 60 == 1 { camLog.info("frame \(self.frameCount) enqueued=\(ok)") }
     }
 
-    private func composite(camera: CVPixelBuffer, background: CIImage) -> CVPixelBuffer? {
+    private func composite(camera: CVPixelBuffer, background: CIImage, foreground: CIImage?) -> CVPixelBuffer? {
         let W = CGFloat(Self.width), H = CGFloat(Self.height)
         // A fresh person mask for every frame: reusing the previous one made the edge trail behind when moving.
         let handler = VNImageRequestHandler(cvPixelBuffer: camera, options: [:])
@@ -180,14 +185,17 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         statSeg += CACurrentMediaTime() - ts; statSegN += 1
         guard let maskBuffer = segmentation.results?.first?.pixelBuffer else { return nil }
         // the nisse hat: find the faces in the same camera frame
-        let wantsHat = c.cfg.cameraHat
+        let wantsHat = c.cfg.cameraHat, wantsBeard = c.cfg.cameraBeard, wantsSuit = c.cfg.cameraSuit
+        let wantsCostume = wantsBeard || wantsSuit   // both need the face landmarks
         let now = CACurrentMediaTime()
         let dt = CGFloat(min(0.2, now - lastFrameTime)); lastFrameTime = now
-        var faces: [VNFaceObservation] = []
-        if wantsHat {
+        var faces: [VNFaceObservation] = [], landmarks: [VNFaceObservation] = []
+        if wantsHat || wantsCostume {
             let tf = CACurrentMediaTime()
             try? handler.perform([hat.request])
             faces = hat.request.results ?? []
+            // landmarks: the beard and suit need the face's shape, the hat its eyebrows
+            landmarks = costume.detect(handler, faces: faces)
             statFace += CACurrentMediaTime() - tf
         }
 
@@ -200,19 +208,46 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                                                                      y: camImage.extent.height / maskRaw.extent.height))
         let fill = aspectFillTransform(camImage.extent, W, H)
         if frameCount == 1 || frameCount % 600 == 0 { camLog.info("camera \(Int(camImage.extent.width))×\(Int(camImage.extent.height)), mask \(Int(maskRaw.extent.width))×\(Int(maskRaw.extent.height))") }
-        let cam = camImage.transformed(by: fill)
+        var cam = camImage.transformed(by: fill)
         let mask = maskOnCamera.transformed(by: fill)
+        // the nisse suit is part of the person (recoloured clothes), so it goes in before the cutout
+        // the head's outline is measured first: the hat is built on it, and the suit keeps out of the head with it
+        if wantsHat || wantsCostume {
+            let th = CACurrentMediaTime()
+            hat.update(landmarks.isEmpty ? faces : landmarks, mask: maskBuffer, extent: camImage.extent, transform: fill, dt: dt)
+            statFace += CACurrentMediaTime() - th
+        }
+        // the beard and suit are built on the same measured head
+        if wantsCostume {
+            costume.heads = hat.headsForCostume
+            costume.update(landmarks, extent: camImage.extent, transform: fill, dt: dt)
+        }
+        if wantsSuit { cam = costume.applySuit(to: cam, mask: mask, heads: hat.headOutlines) }
         let bg = aspectFill(background, W, H)
         guard let blend = CIFilter(name: "CIBlendWithMask", parameters: [
             kCIInputImageKey: cam, kCIInputBackgroundImageKey: bg, kCIInputMaskImageKey: mask]),
               var result = blend.outputImage else { return nil }
+        // the beard on the face (it may reach a little beyond the cutout, so it goes on after it)
+        // The beard hangs freely, also beyond the body's outline. Its mouth opening must show the person's own
+        // mouth, never the background: where the opening falls outside the person, the beard is drawn closed.
+        let outRect = CGRect(x: 0, y: 0, width: W, height: H)
+        if wantsBeard, let beard = costume.beardImage(extent: outRect) {
+            result = beard.composited(over: result)
+            if let closed = costume.beardImage(extent: outRect, mouth: false) {
+                let notPerson = mask.applyingFilter("CIColorInvert").cropped(to: outRect)
+                result = closed.applyingFilter("CIBlendWithMask", parameters: [
+                    kCIInputBackgroundImageKey: CIImage.empty(), kCIInputMaskImageKey: notPerson]).composited(over: result)
+            }
+        }
+        // snow pile, nisser and plow in front of the person (the hat still goes on top)
+        if let foreground { result = aspectFill(foreground, W, H).composited(over: result) }
         if wantsHat {
             let th = CACurrentMediaTime()
-            hat.update(faces, mask: maskBuffer, extent: camImage.extent, transform: fill, dt: dt)
-            hat.calibrate(camera: camera, faces: faces, queue: videoQueue)
-            result = hat.apply(to: result)
+            result = hat.apply(to: result, person: mask)
             statFace += CACurrentMediaTime() - th   // detection + drawing the hat
         }
+
+        saveDebugShot(result.cropped(to: outRect), raw: camImage)
 
         if pixelPool == nil {
             let attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -224,6 +259,43 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         guard let pool = pixelPool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb) == kCVReturnSuccess, let pb else { return nil }
         ciContext.render(result.cropped(to: CGRect(x: 0, y: 0, width: W, height: H)), to: pb)
         return pb
+    }
+
+    /// Fault-finding aid, only when the app is started with --kamera-debug=DIR: every 3 seconds the finished
+    /// camera picture is saved there as a PNG, with the points the beard was measured from marked (head axis red,
+    /// under the nose green, the mask's edges at the mouth's height yellow, mouth and chin blue), and the hat's and
+    /// beard's measurements for the same frame are added to log.txt. The camera's own picture of the same moment is
+    /// saved beside it (raa-NNN.jpg), so the same frames can be run again without the camera (--kamera-replay=DIR).
+    /// Nothing is saved otherwise.
+    private static let debugDir: String? = CommandLine.arguments.first { $0.hasPrefix("--kamera-debug=") }.map { String($0.dropFirst(15)) }
+    private var lastDebugShot: CFTimeInterval = 0, debugShots = 0
+    private func saveDebugShot(_ picture: CIImage, raw: CIImage) {
+        guard let dir = Self.debugDir, CACurrentMediaTime() - lastDebugShot >= 3 else { return }
+        lastDebugShot = CACurrentMediaTime(); debugShots += 1
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        var shot = picture
+        let colours = [CIColor(red: 1, green: 0, blue: 0), CIColor(red: 0, green: 1, blue: 0), CIColor(red: 1, green: 1, blue: 0), CIColor(red: 1, green: 1, blue: 0),
+                       CIColor(red: 0, green: 0.5, blue: 1), CIColor(red: 0, green: 0.5, blue: 1)]
+        var lines = [hat.debugText]
+        for s in costume.shapes {
+            for (i, p) in s.marks.enumerated() where p.x.isFinite && p.y.isFinite {
+                shot = CIImage(color: colours[min(i, colours.count - 1)]).cropped(to: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)).composited(over: shot)
+            }
+            lines.append(s.note)
+        }
+        let name = String(format: "billede-%03d.png", debugShots)
+        if let cg = ciContext.createCGImage(shot, from: picture.extent) {
+            try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+        }
+        if let cg = ciContext.createCGImage(raw, from: raw.extent) {
+            try? NSBitmapImageRep(cgImage: cg).representation(using: .jpeg, properties: [.compressionFactor: 0.9])?
+                .write(to: URL(fileURLWithPath: dir).appendingPathComponent(String(format: "raa-%03d.jpg", debugShots)))
+        }
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let text = "\(name) \(stamp)\n" + lines.filter { !$0.isEmpty }.joined(separator: "\n") + "\n\n"
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("log.txt")
+        if let handle = try? FileHandle(forWritingTo: url) { handle.seekToEndOfFile(); handle.write(Data(text.utf8)); try? handle.close() }
+        else { try? Data(text.utf8).write(to: url) }
     }
 
     /// Scales an image of extent `e` to fill W×H (cropping the overflow evenly), as one transform.

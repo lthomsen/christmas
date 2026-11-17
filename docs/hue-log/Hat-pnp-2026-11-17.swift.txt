@@ -1,0 +1,934 @@
+import AppKit
+import CoreImage
+import Vision
+import simd
+
+/// A virtual nisse hat in the JuleHygge Kamera picture, tracked in 3D.
+///
+/// 1. **Head pose (PnP).** A standard 3D face model (outer eye corners, nose tip, mouth corners, chin) is fitted to
+///    the face landmarks Vision finds in every frame. The fit gives the head's full rotation in all three axes and its
+///    position in space, for a pinhole camera. Each frame starts from the previous frame's pose, so the head is
+///    followed continuously, and the pose itself (not the drawing) is smoothed.
+/// 2. **A hat built on a head.** The head is an ellipsoid in the same model, in realistic proportions to the face.
+///    The fur brim lies where a tilted plane cuts the head's surface: high on the forehead, low at the nape, following
+///    the head all the way round. The cap is one cone of cloth from the brim to the tip, narrowing evenly (no waist),
+///    wide enough at its foot for the head to fit inside; its centre line bends backwards and down toward the tip.
+/// 3. **Projection.** Everything is moved with the head pose and projected back with the same camera, so the hat moves
+///    rigidly with the face. Parts facing away from the camera are left out.
+final class NisseHat {
+    /// Face rectangles (the landmarks request is run on these; see Costume.detect).
+    let request: VNDetectFaceRectanglesRequest = {
+        let r = VNDetectFaceRectanglesRequest()
+        if VNDetectFaceRectanglesRequest.supportedRevisions.contains(VNDetectFaceRectanglesRequestRevision3) {
+            r.revision = VNDetectFaceRectanglesRequestRevision3
+        }
+        return r
+    }()
+
+    /// Vision's roll sign mapped to ours (counter-clockwise positive, y up). Used by the costume too.
+    static let rollSign: CGFloat = 1
+
+    typealias V = SIMD3<Double>
+
+    // ------------------------------------------------------------------ model (units ≈ 0.21 mm)
+
+    /// The 3D face model (x to the picture's right, y up, z toward the camera; nose tip at the origin):
+    /// eye corner on the picture's left, the other eye corner, nose tip, mouth corners (left, right), chin.
+    static let facePoints: [V] = [V(-225, 170, -135), V(225, 170, -135), V(0, 0, 0), V(-150, -150, -125), V(150, -150, -125), V(0, -330, -65)]
+    /// The head as an ellipsoid: centre and semi-axes (half breadth, half height, half length), so the forehead is
+    /// at z ≈ −110, the top of the head ≈ 12 cm above the eyes and the back of the head ≈ 21 cm behind the nose.
+    static let headCentre = V(0, 220, -550), headAxes = V(355, 520, 440)
+    /// Hair adds a little volume: the hat sits on a slightly larger head.
+    static let hair = 1.07
+    /// The brim follows a plane: high on the forehead (y at the front), low at the nape (y at the back).
+    static let brimFrontY = 430.0, brimBackY = 180.0   // front ≈ mid-forehead, back ≈ above the nape
+    static let furRadius = 46.0
+
+    // ------------------------------------------------------------------ tracking
+
+    /// Pose: model → camera, X_cam = R(w)·X + t (camera at the origin looking along −z, y up, pixels via `f`).
+    /// `s` is the head's size against the standard head (breadth, height, depth): solved together with the pose
+    /// from the head's outline, since the face only shows the front of the head. The depth can only be seen when
+    /// the head is turned; until then it stays where it was.
+    struct Pose { var w: V; var t: V; var s = V(1, 1, 1) }
+
+    private final class Track {
+        var raw: Pose          // last solved pose (the next frame starts here)
+        var shown: Pose        // smoothed pose that is drawn
+        var centre: CGPoint
+        var lost: CGFloat = 0
+        var fresh = true
+        var filters: [OneEuro]
+        /// This person's face model: starts as the standard model and learns the person's own proportions (x, y)
+        /// from frames where Vision sees the face straight on; the depths stay those of the standard model.
+        var model: [V] = NisseHat.facePoints
+        var learned = 0
+        /// How much each of the head's axes (breadth, height, depth) has been seen in the outline so far.
+        var seen = V(0, 0, 0)
+        /// Frames in a row whose solve was rejected as an impossible jump.
+        var rejected = 0
+        /// The usual distance (px) between a face point and the solved model, as a running average.
+        var typical = 6.0
+        /// The last measured outline and whether the frame counted as straight on (for the log).
+        var lastLine: Outline?
+        var lastFrontal = false
+        /// This person's head size relative to the standard head (breadth and depth, height), learned from the
+        /// outline in the person mask while the face is seen straight on.
+        var headScale = V(1, 1, 1)
+        /// The six points (x, y each) are steadied before solving. Tuned in --nissehue-test: a still head with ±2 px
+        /// noise shakes the hat's top ≈ 0.4 px (2–4 px unsmoothed); after a quick turn it lags ≈ 8 px.
+        var pointFilters = (0..<12).map { _ in OneEuro(minCutoff: 0.4, beta: 0.08) }
+        init(_ p: Pose, centre: CGPoint) {
+            raw = p; shown = p; self.centre = centre
+            // the pose: rotation in radians; position in model units (≈ 0.2 mm), so its speed factor is much smaller;
+            // the distance (z) is the least certain from six points and changes slowly, so it is held hardest
+            filters = (0..<3).map { _ in OneEuro(minCutoff: 0.3, beta: 0.6) }
+                + [OneEuro(minCutoff: 0.3, beta: 0.0006), OneEuro(minCutoff: 0.3, beta: 0.0006), OneEuro(minCutoff: 0.1, beta: 0.0001)]
+            for i in 0..<6 { _ = filters[i].filter(i < 3 ? p.w[i] : p.t[i - 3], dt: 0) }
+        }
+    }
+    private var tracks: [Track] = []
+    private static let keepLost: CGFloat = 0.4, fadeOut: CGFloat = 0.3
+    /// Camera: focal length and principal point in output pixels (set in update).
+    private var f: Double = 950, cx: Double = 640, cy: Double = 360
+    private var lastLog: CFTimeInterval = 0
+
+    /// Feeds this frame's landmark results. `extent` is the camera image, `transform` the same aspect-fill transform
+    /// the camera picture gets.
+    func update(_ observations: [VNFaceObservation], mask: CVPixelBuffer? = nil, extent: CGRect, transform: CGAffineTransform, dt: CGFloat) {
+        let k = Double(hypot(transform.a, transform.b))
+        let out = extent.applying(transform)
+        cx = Double(out.midX); cy = Double(out.midY)
+        // a laptop/desk camera sees about 68° across
+        f = Double(extent.width) / 2 / tan(68.0 / 2 * .pi / 180) * k
+        self.mask = mask.map { ($0, extent, transform.inverted()) }
+
+        for t in tracks { t.fresh = false }
+        for o in observations.prefix(3) {
+            guard let pts = Self.landmarkPoints(o, extent: extent, transform: transform) else { continue }
+            track(points: pts, guess: o, dt: dt)
+            // diagnostics every 2 s (read with: log show --predicate 'subsystem == "dk.julehygge.JuleHygge"')
+            let now = CACurrentMediaTime()
+            if now - lastLog > 2, let t = tracks.first(where: { $0.fresh }) {
+                lastLog = now
+                let p = t.raw, e = sqrt(error(p, pts, model: t.model) / 12)
+                let pf = pts.map { String(format: "%.0f,%.0f", $0.x, $0.y) }.joined(separator: " ")
+                if let line = t.lastLine {
+                    let e = headEllipse(t.raw, scale: t.raw.s)
+                    let rows = line.rows.map { r -> String in let (l, rr) = Self.ellipseRow(e, r.y); return String(format: "y%.0f maske %.0f–%.0f model %.0f–%.0f", r.y, r.l, r.r, l, rr) }.joined(separator: ", ")
+                    camLog.info("hue: omrids \(rows, privacy: .public) top maske \(String(format: "%.0f", line.top ?? -1), privacy: .public) model \(String(format: "%.0f", e.c.1 + sqrt(e.q[1][1])), privacy: .public) | forfra \(t.lastFrontal, privacy: .public) skala \(String(format: "%.2f,%.2f,%.2f", t.headScale.x, t.headScale.y, t.headScale.z), privacy: .public) typisk \(String(format: "%.1f", t.typical), privacy: .public) px")
+                } else { camLog.info("hue: intet omrids") }
+                camLog.info("hue: w=(\(String(format: "%.2f,%.2f,%.2f", p.w.x, p.w.y, p.w.z), privacy: .public)) t=(\(String(format: "%.0f,%.0f,%.0f", p.t.x, p.t.y, p.t.z), privacy: .public)) vision yaw/pitch/roll=(\(String(format: "%.2f,%.2f,%.2f", o.yaw?.doubleValue ?? 0, o.pitch?.doubleValue ?? 0, o.roll?.doubleValue ?? 0), privacy: .public)) fejl \(String(format: "%.1f", e), privacy: .public) px f=\(String(format: "%.0f", self.f), privacy: .public) punkter \(pf, privacy: .public)")
+            }
+        }
+        for t in tracks where !t.fresh { t.lost += dt }
+        tracks.removeAll { $0.lost > Self.keepLost + Self.fadeOut }
+    }
+
+    /// Fits the face model's x and y to this frame's points (the face seen straight on): relative to the middle of
+    /// the eyes, levelled by the eye line and scaled so the eye corners are 450 units apart, as in the standard model.
+    /// Averaged over the frames seen so far; the depths (z) are kept.
+    private func learnModel(_ t: Track, from pts: [CGPoint]) {
+        let m = CGPoint(x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2)
+        let e = CGPoint(x: pts[1].x - pts[0].x, y: pts[1].y - pts[0].y)
+        let a = atan2(Double(e.y), Double(e.x)), sc = 450 / max(1, Double(hypot(e.x, e.y)))
+        let k = 1 / Double(min(t.learned, Self.learnWindow) + 1)   // running average over the last ~learnWindow frontal frames
+        for i in 0..<6 {
+            let dx = Double(pts[i].x - m.x), dy = Double(pts[i].y - m.y)
+            let x = (dx * cos(-a) - dy * sin(-a)) * sc, y = (dx * sin(-a) + dy * cos(-a)) * sc + 170
+            t.model[i].x += (x - t.model[i].x) * k
+            t.model[i].y += (y - t.model[i].y) * k
+        }
+        t.learned += 1
+        if t.learned % 150 == 60 {
+            camLog.info("hue: hovedstørrelse \(String(format: "%.2f, %.2f, %.2f", t.headScale.x, t.headScale.y, t.headScale.z), privacy: .public)")
+            camLog.info("hue: ansigtsmodel lært: \(t.model.map { String(format: "%.0f,%.0f", $0.x, $0.y) }.joined(separator: " "), privacy: .public)")
+        }
+    }
+
+    /// Face and head are learned live, as a running average over about this many frames seen straight on, so they
+    /// follow changes (distance, light, hair, a real hat, another person sitting down).
+    static let learnWindow = 90
+    /// The fastest a head really turns, radians per second (quick head turns peak around 5–6 rad/s).
+    static let maxTurnRate = 8.0
+
+    /// One face's six points this frame: matched to its track, smoothed, solved from the last pose, smoothed again.
+    private func track(points raw: [CGPoint], guess o: VNFaceObservation?, dt: CGFloat) {
+        let centre = raw[2]
+        let near = tracks.filter { !$0.fresh }.min { hypot($0.centre.x - centre.x, $0.centre.y - centre.y) < hypot($1.centre.x - centre.x, $1.centre.y - centre.y) }
+        let eyeDist = hypot(raw[1].x - raw[0].x, raw[1].y - raw[0].y)
+        if let t = near, hypot(t.centre.x - centre.x, t.centre.y - centre.y) < eyeDist * 1.5 {
+            // 1. the points themselves are steadied first: the noise is removed where it starts
+            let pts = raw.enumerated().map { i, p in CGPoint(x: t.pointFilters[2 * i].filter(p.x, dt: dt), y: t.pointFilters[2 * i + 1].filter(p.y, dt: dt)) }
+            // the head's outline around where the head was last frame
+            let line = outline(around: t.raw, scale: t.raw.s)
+            // learn the person's face and head while seen straight on (a running average, so it keeps following changes).
+            // Straight on: the face sits in the middle of the head's outline. (Vision's yaw cannot be trusted for
+            // this: it reported a 35° turn for a face looking straight into the camera.)
+            // nodding cannot be told from the face's own proportions, so the last solve (where the head's outline
+            // sits around the face) must not show a nod either
+            let fwd = Self.rotationMatrix(t.raw.w) * V(0, 0, 1)
+            let pitchOK = abs(o?.pitch?.doubleValue ?? 0) < 0.2 && abs(fwd.y) < 0.1
+            var frontal: Bool
+            if let row = line?.rows.first {
+                frontal = abs((row.l + row.r) / 2 - Double(raw[0].x + raw[1].x) / 2) < 0.07 * Double(eyeDist) && pitchOK
+            } else {
+                frontal = abs(o?.yaw?.doubleValue ?? 1) < 0.12 && pitchOK
+            }
+            t.lastLine = line; t.lastFrontal = frontal
+            if frontal {
+                learnModel(t, from: raw)
+                if t.learned == 1 { t.raw = solve(pts, from: Pose(w: V(0, 0, 0), t: t.raw.t), model: t.model) }   // re-seat on the new model
+            }
+            // 2. solved from the last pose, with a gentle pull toward it (and a firm one on the distance), the face
+            //    points and the head's outline together
+            var p1 = solve(pts, from: t.raw, prior: t.raw, model: t.model, outline: line, size: t.headScale)
+            // a point that disagrees with the rest (one bad landmark) is trusted less, and the frame solved again
+            let res1 = residuals(p1, pts, model: t.model)
+            // "disagrees" is judged against how well points usually fit in this situation (camera, light, face)
+            let sorted = (0..<6).map { hypot(res1[2 * $0], res1[2 * $0 + 1]) }.sorted()
+            t.typical += ((sorted[2] + sorted[3]) / 2 - t.typical) * 0.05
+            let tol = max(4, 0.08 * Double(eyeDist), 2.5 * t.typical)
+            let trust = (0..<6).map { i -> Double in let d = hypot(res1[2 * i], res1[2 * i + 1]) / tol; return 1 / (1 + d * d) }
+            if trust.contains(where: { $0 < 0.5 }) { p1 = solve(pts, from: t.raw, prior: t.raw, model: t.model, outline: line, size: t.headScale, trust: trust) }
+            // a whole frame that would need a physically impossible turn is a misreading: the last pose is kept,
+            // unless the next frames agree with it (then the head really did turn)
+            let Rd = Self.rotationMatrix(p1.w) * Self.rotationMatrix(t.raw.w).transpose
+            let turn = acos(max(-1, min(1, (Rd[0][0] + Rd[1][1] + Rd[2][2] - 1) / 2)))
+            // (or one where half the points or more disagree with any pose near the last one)
+            let disagree = trust.filter { $0 < 0.5 }.count >= 3
+            if turn > Self.maxTurnRate * Double(max(dt, 1 / 30)) || disagree, t.rejected < 3 {
+                t.rejected += 1
+                if t.rejected == 1 { camLog.info("hue: måling afvist (drejning \(String(format: "%.2f", turn), privacy: .public) rad, \(trust.filter { $0 < 0.5 }.count, privacy: .public) punkter uenige)") }
+                t.centre = centre; t.lost = 0; t.fresh = true
+                return
+            }
+            t.rejected = 0
+            t.raw = p1
+            // the head's size: a running average of what each frame's outline showed
+            if line != nil {
+                // each axis is learned only as far as this frame's outline shows it: the breadth while the face is
+                // seen from the front, the depth while the head is turned sideways (or nods), the height unless nodding
+                let fwd = Self.rotationMatrix(t.raw.w) * V(0, 0, 1)
+                let show = V(1 - fwd.x * fwd.x, 1 - fwd.y * fwd.y, min(1, fwd.x * fwd.x + fwd.y * fwd.y) )
+                t.seen = simd_min(t.seen + show, V(repeating: Double(Self.learnWindow)))
+                t.headScale += (t.raw.s - t.headScale) * show / (t.seen + 1)
+            }
+            // 3. the pose is smoothed once more before drawing
+            let p = t.raw
+            let w = V((0..<3).map { t.filters[$0].filter(p.w[$0], dt: Double(dt)) })
+            let tt = V((0..<3).map { t.filters[3 + $0].filter(p.t[$0], dt: Double(dt)) })
+            t.shown = Pose(w: w, t: tt)
+            t.centre = centre; t.lost = 0; t.fresh = true
+        } else {
+            let p = o.map { initialPose(raw, $0) } ?? solve(raw, from: Pose(w: V(0, 0, 0), t: V(0, 0, -f * 450 / max(10, Double(eyeDist)))))
+            let t = Track(p, centre: centre)
+            for (i, q) in raw.enumerated() { _ = t.pointFilters[2 * i].filter(q.x, dt: 0); _ = t.pointFilters[2 * i + 1].filter(q.y, dt: 0) }
+            tracks.append(t)
+        }
+    }
+
+    /// Puts a hat on every tracked head, on top of `image`.
+    /// `person` is the person mask in output coordinates: the part of the brim behind the head is hidden wherever
+    /// the person is (the real outline, not the head model), and seen only beside the head.
+    func apply(to image: CIImage, person: CIImage? = nil) -> CIImage {
+        var out = image
+        for t in tracks {
+            let alpha = t.lost <= Self.keepLost ? 1 : max(0, 1 - (t.lost - Self.keepLost) / Self.fadeOut)
+            if alpha <= 0 { continue }
+            if var back = render(t.shown, scale: t.headScale, alpha: alpha, behind: true, maskless: person == nil) {
+                if let person {
+                    let notPerson = person.applyingFilter("CIColorInvert").cropped(to: image.extent)
+                    back = back.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: CIImage.empty(), kCIInputMaskImageKey: notPerson])
+                }
+                out = back.composited(over: out)
+            }
+            if let hat = render(t.shown, scale: t.headScale, alpha: alpha, behind: false) { out = hat.composited(over: out) }
+        }
+        return out
+    }
+
+    /// The six model points in output coordinates (y up), from Vision's landmarks: the two outer eye corners
+    /// (ordered left to right in the picture), the nose tip, the mouth corners (left, right) and the chin.
+    static func landmarkPoints(_ o: VNFaceObservation, extent: CGRect, transform: CGAffineTransform) -> [CGPoint]? {
+        guard let lm = o.landmarks, let le = lm.leftEye, let re = lm.rightEye, let lips = lm.outerLips,
+              let contour = lm.faceContour else { return nil }
+        func pts(_ r: VNFaceLandmarkRegion2D) -> [CGPoint] {
+            r.pointsInImage(imageSize: extent.size).map { CGPoint(x: $0.x + extent.minX, y: $0.y + extent.minY).applying(transform) }
+        }
+        let e1 = pts(le), e2 = pts(re), m = pts(lips), c = pts(contour)
+        guard !e1.isEmpty, !e2.isEmpty, m.count >= 2, c.count >= 3 else { return nil }
+        let e1x = e1.map(\.x).reduce(0, +) / CGFloat(e1.count), e2x = e2.map(\.x).reduce(0, +) / CGFloat(e2.count)
+        let (a, b) = e1x < e2x ? (e1, e2) : (e2, e1)
+        let leftCorner = a.min { $0.x < $1.x }!, rightCorner = b.max { $0.x < $1.x }!
+        // nose tip: the last point of the nose crest (bridge → tip), else the lowest nose point
+        var tip: CGPoint
+        if let crest = lm.noseCrest, let last = pts(crest).last { tip = last }
+        else if let nose = lm.nose, let low = pts(nose).min(by: { $0.y < $1.y }) { tip = low } else { return nil }
+        if tip.x.isNaN { tip = CGPoint(x: (leftCorner.x + rightCorner.x) / 2, y: leftCorner.y) }
+        let mouthL = m.min { $0.x < $1.x }!, mouthR = m.max { $0.x < $1.x }!
+        let chin = c[c.count / 2]
+        return [leftCorner, rightCorner, tip, mouthL, mouthR, chin]
+    }
+
+    // ------------------------------------------------------------------ PnP (Levenberg–Marquardt)
+
+    static func rotationMatrix(_ w: V) -> simd_double3x3 {
+        let a = simd_length(w)
+        if a < 1e-9 { return matrix_identity_double3x3 }
+        let k = w / a
+        let K = simd_double3x3(rows: [V(0, -k.z, k.y), V(k.z, 0, -k.x), V(-k.y, k.x, 0)])
+        return matrix_identity_double3x3 + sin(a) * K + (1 - cos(a)) * (K * K)
+    }
+
+    /// Axis-angle vector of a rotation matrix.
+    static func axisAngle(_ R: simd_double3x3) -> V {
+        let c = max(-1, min(1, (R[0][0] + R[1][1] + R[2][2] - 1) / 2)), a = acos(c)
+        if a < 1e-6 { return V(0, 0, 0) }
+        // simd matrices are column-major: R[col][row]
+        return V(R[1][2] - R[2][1], R[2][0] - R[0][2], R[0][1] - R[1][0]) / (2 * sin(a)) * a
+    }
+
+    private func project(_ X: V, _ p: Pose) -> (Double, Double) {
+        let c = Self.rotationMatrix(p.w) * X + p.t
+        let z = max(1, -c.z)
+        return (cx + f * c.x / z, cy + f * c.y / z)
+    }
+
+    private func residuals(_ p: Pose, _ pts: [CGPoint], model: [V] = NisseHat.facePoints, weights: [Double]? = nil) -> [Double] {
+        var r: [Double] = []
+        for (i, (X, q)) in zip(model, pts).enumerated() {
+            let (u, v) = project(X, p)
+            let w = weights?[i] ?? 1
+            r.append((u - Double(q.x)) * w); r.append((v - Double(q.y)) * w)
+        }
+        return r
+    }
+
+    /// How much to trust each face point in a pose: a point on the side of the face turned away from the camera
+    /// is hidden, and Vision only guesses it, so it counts less (its surface faces sideways or away).
+    private func visibility(_ p: Pose, model: [V]) -> [Double] {
+        let R = Self.rotationMatrix(p.w)
+        return model.map { X in
+            // the face's surface normal there: mostly forward, tilted outward by how far out to the side the point is
+            let n = simd_normalize(V(X.x / 300, 0, 1))
+            let c = R * X + p.t
+            let facing = simd_dot(R * n, simd_normalize(-c))
+            return max(0.02, min(1, facing * 1.6))
+        }
+    }
+
+    private func error(_ p: Pose, _ pts: [CGPoint], model: [V] = NisseHat.facePoints) -> Double { residuals(p, pts, model: model).reduce(0) { $0 + $1 * $1 } }
+
+    // ------------------------------------------------------------------ the head's outline (person mask)
+
+    /// The head's outline measured in the person mask, in output pixels (y up): its left and right edge on two rows
+    /// across the upper head, and the top of the head (with hair). Six face points alone cannot tell how far the
+    /// head is turned (a face turned 80° gives points that fit 35° nearly as well), but the head behind the face
+    /// can: turned sideways, the back of the head sticks far out behind the face.
+    struct Outline { var rows: [(y: Double, l: Double, r: Double)]; var top: Double? }
+
+    /// The head ellipsoid (with hair, scaled per axis) as seen by the camera: centre and the 2×2 shape matrix of its
+    /// outline in pixels (weak perspective; the head is small next to its distance).
+    private func headEllipse(_ p: Pose, scale: V) -> (c: (Double, Double), q: simd_double2x2) {
+        let R = Self.rotationMatrix(p.w)
+        let cc = R * Self.headCentre + p.t
+        let s = f / max(1, -cc.z)
+        let A = Self.headAxes * Self.hair * scale
+        let M = R * simd_double3x3(diagonal: A)
+        // rows of M: x and y in the picture; the outline is {M·u : |u| = 1} projected, i.e. shape (M Mᵀ) for x, y
+        let rx = V(M[0][0], M[1][0], M[2][0]), ry = V(M[0][1], M[1][1], M[2][1])
+        let s2 = s * s, xx = simd_dot(rx, rx) * s2, xy = simd_dot(rx, ry) * s2, yy = simd_dot(ry, ry) * s2
+        let q = simd_double2x2(SIMD2<Double>(xx, xy), SIMD2<Double>(xy, yy))
+        return ((cx + s * cc.x, cy + s * cc.y), q)
+    }
+
+    /// Where the ellipse outline crosses the row `y`: left and right x (the middle if the row misses it).
+    private static func ellipseRow(_ e: (c: (Double, Double), q: simd_double2x2), _ y: Double) -> (Double, Double) {
+        let qi = e.q.inverse
+        let a = qi[0][0], b = qi[1][0], d = qi[1][1], dy = y - e.c.1
+        let disc = b * b * dy * dy - a * (d * dy * dy - 1)
+        let mid = -b * dy / a
+        let h = disc > 0 ? sqrt(disc) / a : 0
+        return (e.c.0 + mid - h, e.c.0 + mid + h)
+    }
+
+    /// The camera's person mask for this frame, with what is needed to look up output pixels in it.
+    private var mask: (buffer: CVPixelBuffer, extent: CGRect, inverse: CGAffineTransform)?
+
+    /// Measures the head's outline around where `guess` puts the head.
+    private func outline(around guess: Pose, scale: V) -> Outline? {
+        guard let (buf, extent, inv) = mask else { return nil }
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buf)?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let mw = CVPixelBufferGetWidth(buf), mh = CVPixelBufferGetHeight(buf), rowBytes = CVPixelBufferGetBytesPerRow(buf)
+        func inside(_ x: Double, _ y: Double) -> Bool {
+            let p = CGPoint(x: x, y: y).applying(inv)
+            let mx = Int((p.x - extent.minX) / extent.width * CGFloat(mw)), my = Int((1 - (p.y - extent.minY) / extent.height) * CGFloat(mh))
+            guard mx >= 0, mx < mw, my >= 0, my < mh else { return false }
+            return base[my * rowBytes + mx] > 127
+        }
+        let e = headEllipse(guess, scale: scale)
+        let halfW = sqrt(e.q[0][0]), halfH = sqrt(e.q[1][1])
+        guard halfW > 8, halfH > 8 else { return nil }
+        let maskPx = Double(1 / hypot(inv.a, inv.b)) * Double(extent.width) / Double(mw)   // one mask pixel in output pixels
+        let step = max(1, maskPx * 0.7)
+        /// Walks from (x, y) along (dx, dy) while inside the person (small gaps in the hair are allowed).
+        func reach(_ x: Double, _ y: Double, _ dx: Double, _ dy: Double, limit: Double) -> Double {
+            var dist = 0.0, last = 0.0, gap = 0
+            while dist < limit {
+                dist += step
+                if inside(x + dx * dist, y + dy * dist) { last = dist; gap = 0 } else { gap += 1; if gap > 4 { break } }
+            }
+            // the edge lies between the last point inside and the first outside
+            return last > 0 ? last + min(step, maskPx) / 2 : 0
+        }
+        var rows: [(y: Double, l: Double, r: Double)] = []
+        for k in [0.2, 0.5] {
+            let y = e.c.1 + halfH * k
+            // start inside the person: at the head's expected middle, or the nearest inside point along the row
+            var x0: Double?
+            for o in stride(from: 0.0, through: halfW, by: step) {
+                if inside(e.c.0 + o, y) { x0 = e.c.0 + o; break }
+                if inside(e.c.0 - o, y) { x0 = e.c.0 - o; break }
+            }
+            guard let x = x0 else { continue }
+            let l = x - reach(x, y, -1, 0, limit: halfW * 2.5), r = x + reach(x, y, 1, 0, limit: halfW * 2.5)
+            // a row much wider than the head ran into a raised hand or the shoulders: not the head
+            if r - l > halfW * 3.2 || r - l < halfW * 0.6 { continue }
+            rows.append((y, l, r))
+        }
+        guard let upper = rows.last else { return nil }
+        var top: Double?
+        for i in 0...16 {
+            let x = upper.l + (upper.r - upper.l) * Double(i) / 16
+            if inside(x, upper.y) { top = max(top ?? upper.y, upper.y + reach(x, upper.y, 0, 1, limit: halfH * 2)) }
+        }
+        return Outline(rows: rows, top: top)
+    }
+
+    /// Residuals of the head's outline for a pose, in pixels (weighted).
+    private func outlineResiduals(_ p: Pose, _ o: Outline) -> [Double] {
+        let e = headEllipse(p, scale: p.s)
+        var r: [Double] = []
+        for row in o.rows {
+            let (l, rr) = Self.ellipseRow(e, row.y)
+            r.append((l - row.l) * Self.outlineWeight); r.append((rr - row.r) * Self.outlineWeight)
+        }
+        if let top = o.top { r.append((e.c.1 + sqrt(e.q[1][1]) - top) * Self.outlineWeight * 0.6) }
+        return r
+    }
+    static let outlineWeight = 0.8
+
+    /// Extra residuals pulling the pose toward `prior` (the last frame): a little on rotation and sideways position,
+    /// firmly on the distance. Six points leave turn ↔ sideways shift and nod ↔ height partly ambiguous; the pull
+    /// lets only real movement through instead of noise flipping between them.
+    private func priorResiduals(_ p: Pose, _ prior: Pose) -> [Double] {
+        let wr = 15.0, wt = 0.02, wz = 0.06   // pixels per radian / per model unit
+        return [(p.w.x - prior.w.x) * wr, (p.w.y - prior.w.y) * wr, (p.w.z - prior.w.z) * wr,
+                (p.t.x - prior.t.x) * wt, (p.t.y - prior.t.y) * wt, (p.t.z - prior.t.z) * wz]
+    }
+
+    /// Fits the face model to the six points, starting from `start`.
+    private func solve(_ pts: [CGPoint], from start: Pose, prior: Pose? = nil, model: [V] = NisseHat.facePoints,
+                       outline: Outline? = nil, size: V = V(1, 1, 1), trust: [Double]? = nil) -> Pose {
+        // with an outline the head's size is solved too, held toward its long-run value: it changes only where the
+        // outline really shows it (the depth only with the head turned)
+        let np = outline == nil ? 6 : 9
+        // the points' weights follow from where the solve starts (fixed during it, so the fit stays a plain least squares)
+        var weights = outline == nil ? nil : visibility(start, model: model)
+        if let trust { weights = zip(weights ?? trust.map { _ in 1 }, trust).map { $0 * $1 } }
+        func res(_ p: Pose) -> [Double] {
+            var r = residuals(p, pts, model: model, weights: weights) + (prior.map { priorResiduals(p, $0) } ?? [])
+            if let outline { r += outlineResiduals(p, outline); r += [(p.s.x - size.x) * 20, (p.s.y - size.y) * 20, (p.s.z - size.z) * 20] }
+            return r
+        }
+        func err(_ p: Pose) -> Double { res(p).reduce(0) { $0 + $1 * $1 } }
+        var p = start
+        var lambda = 1e-3
+        var e0 = err(p)
+        for _ in 0..<15 {
+            let r = res(p)
+            // numeric Jacobian, residuals × parameters (rotation, position, and the head's size)
+            var J = [[Double]](repeating: [Double](repeating: 0, count: np), count: r.count)
+            for j in 0..<np {
+                var q = p
+                let h = j < 3 ? 1e-4 : j < 6 ? 0.5 : 1e-4
+                if j < 3 { q.w[j] += h } else if j < 6 { q.t[j - 3] += h } else { q.s[j - 6] += h }
+                let rq = res(q)
+                for i in 0..<r.count { J[i][j] = (rq[i] - r[i]) / h }
+            }
+            // (JᵀJ + λ·diag) δ = −Jᵀr
+            var A = [[Double]](repeating: [Double](repeating: 0, count: np), count: np), g = [Double](repeating: 0, count: np)
+            for i in 0..<r.count { for a in 0..<np { g[a] += J[i][a] * r[i]; for b in 0..<np { A[a][b] += J[i][a] * J[i][b] } } }
+            for a in 0..<np { A[a][a] *= 1 + lambda }
+            guard let d = Self.solveLinear(A, g.map { -$0 }) else { break }
+            var q = p
+            for j in 0..<3 { q.w[j] += d[j]; q.t[j] += d[3 + j] }
+            if np == 9 { for j in 0..<3 { q.s[j] = max(0.75, min(1.5, q.s[j] + d[6 + j])) } }
+            let e = err(q)
+            if e < e0 { p = q; e0 = e; lambda = max(1e-7, lambda / 4) } else { lambda *= 8 }
+            if (d.map { abs($0) }.max() ?? 0) < 1e-6 { break }
+        }
+        return p
+    }
+
+    private static func solveLinear(_ A: [[Double]], _ b: [Double]) -> [Double]? {
+        var M = A, y = b
+        let n = b.count
+        for c in 0..<n {
+            var piv = c
+            for r in c..<n where abs(M[r][c]) > abs(M[piv][c]) { piv = r }
+            guard abs(M[piv][c]) > 1e-12 else { return nil }
+            M.swapAt(c, piv); y.swapAt(c, piv)
+            for r in (c + 1)..<max(c + 1, n) {
+                let k = M[r][c] / M[c][c]
+                for cc in c..<n { M[r][cc] -= k * M[c][cc] }
+                y[r] -= k * y[c]
+            }
+        }
+        var x = [Double](repeating: 0, count: n)
+        for r in stride(from: n - 1, through: 0, by: -1) {
+            var s = y[r]
+            for cc in (r + 1)..<max(r + 1, n) { s -= M[r][cc] * x[cc] }
+            x[r] = s / M[r][r]
+        }
+        return x
+    }
+
+    /// A first pose for a new face: from Vision's angles (both signs of turn and nod, since their convention is
+    /// not documented) or no rotation, at the distance the eye corners suggest; the best fit after solving wins.
+    private func initialPose(_ pts: [CGPoint], _ o: VNFaceObservation) -> Pose {
+        let roll = Double(o.roll?.doubleValue ?? 0), yaw = Double(o.yaw?.doubleValue ?? 0), pitch = Double(o.pitch?.doubleValue ?? 0)
+        let eyeDist = Double(hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y))
+        let Z = f * 450 / max(10, eyeDist)
+        let eye = CGPoint(x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2)
+        let camEye = V((Double(eye.x) - cx) * Z / f, (Double(eye.y) - cy) * Z / f, -Z)
+        var best: Pose?, bestErr = Double.infinity
+        for (sy, sp) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (0.0, 0.0)] {
+            let w = Self.axisAngle(Self.rotation(roll: CGFloat(roll), yaw: CGFloat(yaw * sy), pitch: CGFloat(pitch * sp)))
+            let t = camEye - Self.rotationMatrix(w) * V(0, 170, -135)
+            let p = solve(pts, from: Pose(w: w, t: t))
+            let e = error(p, pts)
+            if e < bestErr { bestErr = e; best = p }
+        }
+        return best!
+    }
+
+    /// Rotation from tilt (z) · turn (y) · nod (x).
+    static func rotation(roll: CGFloat, yaw: CGFloat, pitch: CGFloat) -> simd_double3x3 {
+        let (cr, sr) = (cos(Double(roll)), sin(Double(roll)))
+        let (cy, sy) = (cos(Double(yaw)), sin(Double(yaw)))
+        let (cp, sp) = (cos(Double(pitch)), sin(Double(pitch)))
+        let rz = simd_double3x3(rows: [V(cr, -sr, 0), V(sr, cr, 0), V(0, 0, 1)])
+        let ry = simd_double3x3(rows: [V(cy, 0, sy), V(0, 1, 0), V(-sy, 0, cy)])
+        let rx = simd_double3x3(rows: [V(1, 0, 0), V(0, cp, -sp), V(0, sp, cp)])
+        return rz * ry * rx
+    }
+
+    // ------------------------------------------------------------------ the hat on the head
+
+    /// A point on the (hair-covered) head at azimuth `theta` (0 = right, π/2 = front, 3π/2 = back) where the head
+    /// meets the plane y = planeY(z), found by bisection on the polar angle; also the head's outward normal there.
+    private static func onHead(_ theta: Double, scale: Double, planeY: (Double) -> Double) -> (V, V) {
+        let A = headAxes * (hair * scale), C = headCentre
+        func point(_ beta: Double) -> V { C + V(A.x * sin(beta) * cos(theta), A.y * cos(beta), A.z * sin(beta) * sin(theta)) }
+        var lo = 0.0, hi = Double.pi
+        for _ in 0..<30 {
+            let mid = (lo + hi) / 2, p = point(mid)
+            if p.y - planeY(p.z) > 0 { lo = mid } else { hi = mid }
+        }
+        let p = point((lo + hi) / 2)
+        let d = p - C
+        let n = simd_normalize(V(d.x / (A.x * A.x), d.y / (A.y * A.y), d.z / (A.z * A.z)))
+        return (p, n)
+    }
+
+    /// A point `lift` out from the head at azimuth `theta`, on a plane between the brim's (u = 0) and level at the
+    /// top of the head (u = 1).
+    static func skull(_ theta: Double, _ u: Double, lift: Double) -> V {
+        let topY = headCentre.y + headAxes.y * hair * 0.9
+        let (p, n) = onHead(theta, scale: 1.0, planeY: { z in brimPlane(z) * (1 - u) + topY * u })
+        return p + n * lift
+    }
+
+    /// The brim's plane: from the forehead (z ≈ −110) at brimFrontY down to the nape (z ≈ −990) at brimBackY.
+    private static func brimPlane(_ z: Double) -> Double {
+        let zf = headCentre.z + headAxes.z, zb = headCentre.z - headAxes.z
+        return brimBackY + (z - zb) / (zf - zb) * (brimFrontY - brimBackY)
+    }
+
+    private enum Item { case quad([CGPoint], CGColor), ball(CGPoint, CGFloat, Double) }
+    private static let light = simd_normalize(V(-0.45, 0.6, 0.7))
+
+    /// Draws the hat for one pose; returns it positioned in output coordinates.
+    /// `behind`: only the parts behind the head (the back of the brim), else everything else. Without a person
+    /// mask (`maskless`, tests) the head model's outline hides the back instead.
+    private func render(_ pose: Pose, scale: V = V(1, 1, 1), alpha: CGFloat, behind: Bool, maskless: Bool = true) -> CIImage? {
+        let R = Self.rotationMatrix(pose.w)
+        let f = self.f, cx = self.cx, cy = self.cy
+        // the hat is built on the standard head and scaled about its centre to this person's head
+        func cam(_ X: V) -> V { R * (Self.headCentre + scale * (X - Self.headCentre)) + pose.t }
+        func screen(_ c: V) -> CGPoint { CGPoint(x: cx + f * c.x / max(1, -c.z), y: cy + f * c.y / max(1, -c.z)) }
+        func facing(_ c: V, _ n: V) -> Double { simd_dot(n, simd_normalize(-c)) }   // > 0: faces the camera
+        let halfway = simd_normalize(Self.light + V(0, 0, 1))
+        // the head (as measured, with hair) as it covers things behind it on screen
+        let headE = headEllipse(pose, scale: scale), headInv = headE.q.inverse
+        var items: [(Double, Item)] = []
+
+        // the cap: ONE cone of cloth from inside the fur brim to the tip, narrowing slowly low down and faster toward the tip (no waist),
+        // its centre line bending backwards and down toward the tip; the fur brim stays where it sits on the head
+        let segs = 40
+        let footRing = (0..<segs).map { Self.skull(Double($0) / Double(segs) * 2 * .pi, 0, lift: 14) }
+        let base = footRing.reduce(V(0, 0, 0), +) / Double(segs)
+        let spine = [base, base + V(0, 640, -40), base + V(60, 840, -260), base + V(420, 500, -480)]
+        func bez(_ t: Double) -> (V, V) {
+            let u = 1 - t
+            var p = (u * u * u) * spine[0]; p += (3 * u * u * t) * spine[1]; p += (3 * u * t * t) * spine[2]; p += (t * t * t) * spine[3]
+            var d = (3 * u * u) * (spine[1] - spine[0]); d += (6 * u * t) * (spine[2] - spine[1]); d += (3 * t * t) * (spine[3] - spine[2])
+            return (p, simd_normalize(d))
+        }
+        // arc length along the centre line, so the cone narrows evenly per unit of length
+        let steps = 48
+        var arc = [0.0]
+        for k in 1...steps { arc.append(arc[k - 1] + simd_length(bez(Double(k) / Double(steps)).0 - bez(Double(k - 1) / Double(steps)).0)) }
+        let L = arc[steps]
+        let t0 = bez(0).1
+        var rings: [[V]] = []
+        for k in 0...steps {
+            let t = Double(k) / Double(steps)
+            let (c, tan) = bez(t)
+            // full and soft low down, narrowing ever faster toward the tip (a straight taper looked stiff)
+            let shrink = pow(1 - arc[k] / L, 0.72)
+            // the foot's shape, turned with the centre line (shortest rotation from its start direction) and shrunk
+            let axis = simd_cross(t0, tan), sinA = simd_length(axis), cosA = simd_dot(t0, tan)
+            let Rt = sinA < 1e-6 ? matrix_identity_double3x3 : Self.rotationMatrix(axis / sinA * atan2(sinA, cosA))
+            rings.append((0..<segs).map { j in
+                let off = Rt * (footRing[j] - base)
+                let len = simd_length(off)
+                var q = c + off * shrink + (len > 1 ? off / len * 12 * (1 - shrink) : V(0, 0, 0))
+                // where the head itself would poke through the straight cone (the back of the head, above the low
+                // brim there), the cloth is pushed out over it
+                let d = q - Self.headCentre, A = Self.headAxes * Self.hair
+                let e = sqrt(d.x * d.x / (A.x * A.x) + d.y * d.y / (A.y * A.y) + d.z * d.z / (A.z * A.z))
+                if e < 1.03, e > 0.01 { q = Self.headCentre + d * (1.03 / e) }
+                return q
+            })
+        }
+        for k in 0..<(rings.count - 1) {
+            let a = rings[k], b = rings[k + 1]
+            let ca = a.reduce(V(0, 0, 0), +) / Double(segs), cb = b.reduce(V(0, 0, 0), +) / Double(segs)
+            for j in 0..<segs {
+                let j1 = (j + 1) % segs
+                let p = [a[j], a[j1], b[j1], b[j]].map(cam)
+                let mid = (p[0] + p[1] + p[2] + p[3]) / 4
+                var outward = (a[j] + a[j1]) / 2 - ca; outward += (b[j] + b[j1]) / 2 - cb
+                let n = simd_normalize(R * outward)
+                if facing(mid, n) < -0.02 { continue }
+                let diffuse = max(0, simd_dot(n, Self.light)), spec = pow(max(0, simd_dot(n, halfway)), 16) * 0.22
+                let shade = 0.32 + 0.68 * diffuse
+                let col = CGColor(srgbRed: min(1, 0.80 * shade + spec), green: min(1, 0.07 * shade + spec * 0.9),
+                                  blue: min(1, 0.12 * shade + spec * 0.9), alpha: 1)
+                if !behind { items.append((mid.z, .quad(p.map(screen), col))) }
+            }
+        }
+        // the fur brim: two rows of fluffy balls round the head, on the brim plane, a little out from the head
+        let n = 64
+        for (row, spec) in [(-14.0, Self.furRadius, 0.9), (26.0, Self.furRadius * 0.85, 0.6)].enumerated() {
+            let (lift, size, out) = spec
+            for i in 0..<n {
+                let theta = (Double(i) + (row == 1 ? 0.5 : 0)) / Double(n) * 2 * .pi
+                let (p, nrm) = Self.onHead(theta, scale: 1.0, planeY: { Self.brimPlane($0) + lift })
+                let c = cam(p + nrm * (size * out))
+                let nc = R * nrm
+                // the part of the brim behind the head is hidden only where the head covers it: the brim is wider
+                // than the head, so at the sides it is seen going round behind it (it does not stop in the air)
+                let back = facing(c, nc) < 0
+                if back != behind { continue }
+                if back, maskless {
+                    let q = screen(c), d = SIMD2(Double(q.x) - headE.c.0, Double(q.y) - headE.c.1)
+                    if simd_dot(d, headInv * d) < 1 { continue }
+                }
+                let shade = 0.6 + 0.4 * max(0, simd_dot(nc, Self.light))
+                items.append((c.z + 90, .ball(screen(c), CGFloat(f * size * scale.x / max(1, -c.z)), shade)))
+            }
+        }
+        // pompom at the tip
+        let (tipC, _) = bez(1)
+        let tip = cam(tipC + V(0, -30, 0))
+        if !behind { items.append((tip.z + 40, .ball(screen(tip), CGFloat(f * 70 / max(1, -tip.z)), 0.9))) }
+
+        // draw into the bounding box of everything, back to front
+        var bounds = CGRect.null
+        for (_, it) in items {
+            switch it {
+            case let .quad(pts, _): for p in pts { bounds = bounds.union(CGRect(origin: p, size: .zero)) }
+            case let .ball(p, r, _): bounds = bounds.union(CGRect(x: p.x - r * 1.5, y: p.y - r * 1.5, width: r * 3, height: r * 3))
+            }
+        }
+        bounds = bounds.insetBy(dx: -4, dy: -4).integral
+        guard !bounds.isNull, bounds.width > 4, bounds.height > 4, bounds.width < 4000, bounds.height < 4000,
+              let g = CGContext(data: nil, width: Int(bounds.width), height: Int(bounds.height), bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        g.translateBy(x: -bounds.minX, y: -bounds.minY)
+        g.setAlpha(alpha)
+        g.setLineWidth(1); g.setLineJoin(.round)
+        items.sort { $0.0 < $1.0 }
+        for (_, it) in items {
+            switch it {
+            case let .quad(pts, col):
+                g.setFillColor(col); g.setStrokeColor(col)
+                g.addLines(between: pts); g.closePath(); g.drawPath(using: .fillStroke)
+            case let .ball(p, r, shade):
+                let rect = CGRect(x: p.x - r * 1.4, y: p.y - r * 1.4, width: r * 2.8, height: r * 2.8)
+                g.draw(Self.fluffLight, in: rect)
+                g.setAlpha(alpha * CGFloat(max(0, min(1, (1 - shade) * 1.1))))
+                g.draw(Self.fluffDark, in: rect)
+                g.setAlpha(alpha)
+            }
+        }
+        guard let img = g.makeImage() else { return nil }
+        return CIImage(cgImage: img).transformed(by: CGAffineTransform(translationX: bounds.minX, y: bounds.minY))
+    }
+
+    /// A soft fuzzy fur ball (lit), and the same shape in shadow colour to fade over it. The shadow is a soft
+    /// neutral grey: a blue-grey one made the brim look grey-blue instead of white next to the beard.
+    private static let fluffLight = fluff(C(255, 255, 255), C(246, 246, 244))
+    private static let fluffDark = fluff(C(196, 194, 196), C(182, 180, 184))
+    private static func fluff(_ inner: CGColor, _ outer: CGColor) -> CGImage {
+        let s = 96
+        let g = CGContext(data: nil, width: s, height: s, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        var rng = SeededRandom(seed: 7)
+        let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                              colors: [inner, outer, outer.copy(alpha: 0)!] as CFArray, locations: [0, 0.78, 1])!
+        for _ in 0..<14 {
+            let a = Double(rng.next()) * 2 * .pi, d = Double(rng.next()) * 14
+            let c = CGPoint(x: 48 + cos(a) * d, y: 48 + sin(a) * d)
+            g.drawRadialGradient(grad, startCenter: CGPoint(x: c.x - 6, y: c.y + 6), startRadius: 0, endCenter: c, endRadius: 34, options: [])
+        }
+        return g.makeImage()!
+    }
+
+    // ------------------------------------------------------------------ test
+
+    /// Test aid (--nissehue-test=DIR[,IMAGE]):
+    /// - without an image: checks the pose solver on known poses (with noise) and draws the hat with the head model's
+    ///   surface and face points in six poses (hoveder.png);
+    /// - with an image: finds the face, solves its pose and puts the hat on it, with the six points marked (med-hue.png).
+    static func test(dir: String, image: String?) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        func write(_ img: CIImage, _ name: String) {
+            guard let cg = GPU.ciContext.createCGImage(img, from: img.extent) else { return }
+            try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+            print("skrev", name)
+        }
+        if let image, let src = CIImage(contentsOf: URL(fileURLWithPath: image)) {
+            let hat = NisseHat()
+            let handler = VNImageRequestHandler(ciImage: src, options: [:])
+            try? handler.perform([hat.request])
+            let lm = VNDetectFaceLandmarksRequest(); lm.inputFaceObservations = hat.request.results ?? []
+            try? handler.perform([lm])
+            let faces = lm.results ?? []
+            let seg = VNGeneratePersonSegmentationRequest(); seg.qualityLevel = .balanced; seg.outputPixelFormat = kCVPixelFormatType_OneComponent8
+            try? handler.perform([seg])
+            for _ in 0..<8 { hat.update(faces, mask: seg.results?.first?.pixelBuffer, extent: src.extent, transform: .identity, dt: 1) }
+            var img = hat.apply(to: src)
+            if let f = faces.first, let pts = landmarkPoints(f, extent: src.extent, transform: .identity), let t = hat.tracks.first {
+                print(String(format: "pose: rotation (%.2f, %.2f, %.2f) afstand %.0f, fejl %.1f px (rms)",
+                             t.raw.w.x, t.raw.w.y, t.raw.w.z, -t.raw.t.z, sqrt(hat.error(t.raw, pts) / 12)))
+                for p in pts { img = CIImage(color: CIColor(red: 0, green: 1, blue: 0)).cropped(to: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6)).composited(over: img) }
+            } else { print("intet ansigt med landmarks") }
+            write(img.cropped(to: src.extent), "med-hue.png")
+            return
+        }
+        // 1. the solver on known poses (noisy points, solved from no rotation)
+        let hat = NisseHat()
+        hat.f = 950; hat.cx = 640; hat.cy = 360
+        var maxErr = 0.0
+        for (yaw, pitch, roll) in [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (-0.6, 0.2, 0.1), (0.2, -0.35, -0.2), (0.0, 0.4, 0.3)] {
+            let R = rotation(roll: CGFloat(roll), yaw: CGFloat(yaw), pitch: CGFloat(pitch))
+            let t0 = V(30, -40, -3000)
+            var pts: [CGPoint] = []
+            for X in facePoints {
+                let c = R * X + t0
+                pts.append(CGPoint(x: hat.cx + hat.f * c.x / -c.z + Double.random(in: -1.5...1.5), y: hat.cy + hat.f * c.y / -c.z + Double.random(in: -1.5...1.5)))
+            }
+            let p = hat.solve(pts, from: Pose(w: V(0, 0, 0), t: V(0, 0, -2500)))
+            let Rd = rotationMatrix(p.w) * R.transpose
+            let ang = acos(max(-1, min(1, (Rd[0][0] + Rd[1][1] + Rd[2][2] - 1) / 2)))
+            maxErr = max(maxErr, ang)
+            print(String(format: "  drej %.2f nik %.2f hæld %.2f → fejl %.1f°, afstand %.0f (sand 3000)", yaw, pitch, roll, ang * 180 / .pi, -p.t.z))
+        }
+        print(String(format: "PnP: største vinkelfejl %.1f°", maxErr * 180 / .pi))
+        // jitter: a still head with ±2 px noise on the points for 4 s at 15 fps, through the same tracking as the
+        // camera; how much the top of the hat (the crown point) shakes on screen
+        do {
+            let sim = NisseHat()
+            sim.f = 950; sim.cx = 640; sim.cy = 360
+            let R = rotation(roll: 0.05, yaw: 0.25, pitch: 0.1), t0 = V(20, -60, -3500)
+            func clean() -> [CGPoint] { facePoints.map { X in let c = R * X + t0; return CGPoint(x: 640 + 950 * c.x / -c.z, y: 360 + 950 * c.y / -c.z) } }
+            let crown = headCentre + V(0, headAxes.y, 0)
+            var xs: [Double] = [], ys: [Double] = []
+            for i in 0..<60 {
+                let pts = clean().map { CGPoint(x: $0.x + Double.random(in: -2...2), y: $0.y + Double.random(in: -2...2)) }
+                for t in sim.tracks { t.fresh = false }
+                sim.track(points: pts, guess: nil, dt: 1.0 / 15)
+                if i >= 20, let t = sim.tracks.first {
+                    let c = rotationMatrix(t.shown.w) * crown + t.shown.t
+                    xs.append(640 + 950 * c.x / -c.z); ys.append(360 + 950 * c.y / -c.z)
+                }
+            }
+            func sd(_ a: [Double]) -> Double { let m = a.reduce(0, +) / Double(a.count); return (a.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(a.count)).squareRoot() }
+            print(String(format: "rysten i huens top (stille hoved, ±2 px støj): %.1f px vandret, %.1f px lodret", sd(xs), sd(ys)))
+            // the same without any smoothing (solving each frame from the last), for comparison
+            var p = sim.tracks.first!.raw
+            var rx: [Double] = [], ry: [Double] = []
+            for _ in 0..<40 {
+                let pts = clean().map { CGPoint(x: $0.x + Double.random(in: -2...2), y: $0.y + Double.random(in: -2...2)) }
+                p = sim.solve(pts, from: p)
+                let c = rotationMatrix(p.w) * crown + p.t
+                rx.append(640 + 950 * c.x / -c.z); ry.append(360 + 950 * c.y / -c.z)
+            }
+            print(String(format: "  uden udglatning: %.1f px vandret, %.1f px lodret", sd(rx), sd(ry)))
+            // following a real turn: the head turns 0.6 rad in 1 s; how far the hat's top lags behind at the end
+            let sim2 = NisseHat(); sim2.f = 950; sim2.cx = 640; sim2.cy = 360
+            var lag = 0.0
+            for i in 0..<45 {
+                let yaw = min(1, Double(i) / 15) * 0.6
+                let Rm = rotation(roll: 0, yaw: CGFloat(yaw), pitch: 0)
+                let pts = facePoints.map { X -> CGPoint in let c = Rm * X + t0; return CGPoint(x: 640 + 950 * c.x / -c.z + Double.random(in: -2...2), y: 360 + 950 * c.y / -c.z + Double.random(in: -2...2)) }
+                for t in sim2.tracks { t.fresh = false }
+                sim2.track(points: pts, guess: nil, dt: 1.0 / 15)
+                if i == 17, let t = sim2.tracks.first {   // 2 frames after the turn ended
+                    let truth = Rm * crown + t0, shown = rotationMatrix(t.shown.w) * crown + t.shown.t
+                    lag = hypot(950 * truth.x / -truth.z - 950 * shown.x / -shown.z, 950 * truth.y / -truth.z - 950 * shown.y / -shown.z)
+                }
+            }
+            print(String(format: "  efter en drejning på 1 s: huens top halter %.0f px lige efter, og står stille bagefter", lag))
+        }
+        // 1b. the live case that went wrong: a face straight on (Vision yaw ≈ 0) solved as turned 0.67 rad
+        do {
+            let logged: [[CGFloat]] = [[465,379, 580,383, 536,339, 494,285, 554,286, 523,222], [475,382, 585,385, 543,344, 498,291, 562,294, 528,231],
+                                       [456,379, 569,379, 523,336, 481,283, 543,285, 509,222]]
+            let sim = NisseHat(); sim.f = 949; sim.cx = 640; sim.cy = 360
+            let first = logged[0]
+            let p0 = (0..<6).map { CGPoint(x: first[2 * $0], y: first[2 * $0 + 1]) }
+            let generic = sim.solve(p0, from: Pose(w: V(0, 0, 0), t: V(-300, -100, -3100)))
+            let t = Track(generic, centre: p0[2])
+            for _ in 0..<20 { for l in logged { sim.learnModel(t, from: (0..<6).map { CGPoint(x: l[2 * $0], y: l[2 * $0 + 1]) }) } }
+            let own = sim.solve(p0, from: Pose(w: V(0, 0, 0), t: generic.t), model: t.model)
+            print(String(format: "forfra (logget): standardmodel drejning %.2f rad (fejl %.1f px) → lært model %.2f rad (fejl %.1f px)",
+                         simd_length(generic.w), sqrt(sim.error(generic, p0) / 12), simd_length(own.w), sqrt(sim.error(own, p0, model: t.model) / 12)))
+        }
+        // 1c. turning toward profile: a person whose face and head differ from the standard model looks straight on
+        //     for 4 s, then turns over 2 s and holds. Tracked from the face points alone, and with the head's outline
+        //     from a person mask drawn from the true head (with the neck and shoulders below it).
+        do {
+            let face: [V] = [V(-225, 170, -135), V(225, 170, -135), V(15, 0, 0), V(-120, -185, -125), V(120, -185, -125), V(0, -380, -65)]
+            let trueScale = V(1.12, 1.06, 1.12)
+            let t0 = V(-150, -120, -4000)
+            func run(_ yaw: Double, _ pitch: Double, mask useMask: Bool) -> (Double, Double, Double) {
+                let sim = NisseHat(); sim.f = 949; sim.cx = 640; sim.cy = 360
+                var rng = SeededRandom(seed: 3)
+                var worst = (0.0, 0.0, 0.0)
+                for i in 0..<150 {
+                    let u = min(1, max(0, Double(i - 60) / 30))
+                    let s = u * u * (3 - 2 * u)
+                    let R = rotation(roll: 0, yaw: CGFloat(yaw * s), pitch: CGFloat(pitch * s))
+                    let truth = Pose(w: axisAngle(R), t: t0)
+                    var pts = face.map { X -> CGPoint in let c = R * X + t0; return CGPoint(x: 640 + 949 * c.x / -c.z, y: 360 + 949 * c.y / -c.z) }
+                    // turned far, Vision only guesses the hidden eye corner (the far one: turned to +x, the right one): too close to the nose
+                    if abs(yaw * s) > 0.9, ProcessInfo.processInfo.environment["HUE_NOBIAS"] == nil { let far = yaw > 0 ? 1 : 0; pts[far].x += (pts[2].x - pts[far].x) * 0.3 }
+                    pts = pts.map { CGPoint(x: $0.x + CGFloat(rng.next() * 3 - 1.5), y: $0.y + CGFloat(rng.next() * 3 - 1.5)) }
+                    // misreadings: now and then one point jumps 40 px, and one frame is wrong altogether (mirrored)
+                    if i % 23 == 0, ProcessInfo.processInfo.environment["HUE_NOJUMP"] == nil { pts[i % 6].x += 40 }
+                    if i == 131, ProcessInfo.processInfo.environment["HUE_NOMIRROR"] == nil { let nx = pts[2].x; pts = pts.map { CGPoint(x: 2 * nx - $0.x, y: $0.y) } }
+                    if useMask {
+                        let e = sim.headEllipse(truth, scale: trueScale)
+                        let neck = R * V(0, -420, -480) + t0
+                        let nx = 640 + 949 * neck.x / -neck.z
+                        let halfW = sqrt(e.q[0][0]), halfH = sqrt(e.q[1][1]), qi = e.q.inverse
+                        var pb: CVPixelBuffer?
+                        CVPixelBufferCreate(nil, 512, 384, kCVPixelFormatType_OneComponent8, nil, &pb)
+                        guard let buf = pb else { return worst }
+                        CVPixelBufferLockBaseAddress(buf, [])
+                        let base = CVPixelBufferGetBaseAddress(buf)!.assumingMemoryBound(to: UInt8.self), st = CVPixelBufferGetBytesPerRow(buf)
+                        for my in 0..<384 { for mx in 0..<512 {
+                            let x = (Double(mx) + 0.5) / 512 * 1280, y = (1 - (Double(my) + 0.5) / 384) * 720
+                            let d = SIMD2(x - e.c.0, y - e.c.1)
+                            let inHead = simd_dot(d, qi * d) <= 1
+                            let inNeck = abs(x - nx) < halfW * 0.5 && y < e.c.1 - halfH * 0.3
+                            let inBody = abs(x - nx) < halfW * 2.6 && y < e.c.1 - halfH * 1.5
+                            base[my * st + mx] = inHead || inNeck || inBody ? 255 : 0
+                        } }
+                        CVPixelBufferUnlockBaseAddress(buf, [])
+                        sim.mask = (buf, CGRect(x: 0, y: 0, width: 1280, height: 720), .identity)
+                    }
+                    for tr in sim.tracks { tr.fresh = false }
+                    sim.track(points: pts, guess: nil, dt: 1 / 15)
+                    guard i >= 120, let tr = sim.tracks.first else { continue }
+                    // how far off the hat is: the angle, and where the top of the head and its back land on screen
+                    let Rd = rotationMatrix(tr.shown.w) * R.transpose
+                    let ang = acos(max(-1, min(1, (Rd[0][0] + Rd[1][1] + Rd[2][2] - 1) / 2)))
+                    func px(_ X: V, _ p: Pose, _ sc: V) -> (Double, Double) {
+                        let c = rotationMatrix(p.w) * (headCentre + sc * (X - headCentre)) + p.t
+                        return (949 * c.x / -c.z, 949 * c.y / -c.z)
+                    }
+                    var off = 0.0
+                    for X in [headCentre + V(0, headAxes.y * hair, 0), headCentre - V(0, 0, headAxes.z * hair), headCentre + V(headAxes.x * hair, 100, 0)] {
+                        let a = px(X, truth, trueScale), b = px(X, tr.shown, tr.headScale)
+                        off = max(off, hypot(a.0 - b.0, a.1 - b.1))
+                    }
+                    worst = (max(worst.0, ang), max(worst.1, off), tr.headScale.x)
+                    if i == 149, ProcessInfo.processInfo.environment["HUE_DEBUG"] != nil {
+                        print(String(format: "    sand w (%.2f,%.2f,%.2f) t (%.0f,%.0f,%.0f) | vist w (%.2f,%.2f,%.2f) t (%.0f,%.0f,%.0f) skala (%.2f,%.2f,%.2f) lært %d",
+                                     truth.w.x, truth.w.y, truth.w.z, truth.t.x, truth.t.y, truth.t.z, tr.shown.w.x, tr.shown.w.y, tr.shown.w.z,
+                                     tr.shown.t.x, tr.shown.t.y, tr.shown.t.z, tr.headScale.x, tr.headScale.y, tr.headScale.z, tr.learned))
+                    }
+                }
+                return worst
+            }
+            print("drejning mod profil (andet ansigt og hoved, med fejlmålinger; vinkelfejl / værste afvigelse på hovedets top, bag og side):")
+            for (yaw, pitch) in [(0.0, 0.0), (0.7, 0.0), (1.3, 0.0), (-1.3, 0.0), (0.0, -0.35), (0.9, 0.25)] {
+                let a = run(yaw, pitch, mask: false), b = run(yaw, pitch, mask: true)
+                print(String(format: "  drej %.1f nik %.2f: kun punkter %4.1f° / %3.0f px   med omrids %4.1f° / %3.0f px (lært hovedbredde %.2f, sand 1.12)",
+                             yaw, pitch, a.0 * 180 / .pi, a.1, b.0 * 180 / .pi, b.1, b.2))
+            }
+        }
+        // 2. the hat on the head model in six poses (head surface as dots, face points black)
+        let cell = 420, W = cell * 3, H = cell * 2
+        guard let g = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        g.setFillColor(C(40, 55, 80)); g.fill(CGRect(x: 0, y: 0, width: W, height: H))
+        let poses: [(Double, Double, Double)] = [(0, 0, 0), (0.6, 0, 0), (-0.8, 0, 0), (0, 0.35, 0), (0, -0.3, 0), (0.3, 0.1, 0.35)]
+        var shots: [(Pose, Double, Double)] = []
+        for (i, (yaw, pitch, roll)) in poses.enumerated() {
+            let ccx = Double(i % 3 * cell + cell / 2), ccy = Double((1 - i / 3) * cell + cell / 2 - 60)
+            let R = rotation(roll: CGFloat(roll), yaw: CGFloat(yaw), pitch: CGFloat(pitch))
+            let pose = Pose(w: axisAngle(R), t: V(0, -100, -4200))
+            shots.append((pose, ccx, ccy))
+            g.setFillColor(C(200, 170, 150))
+            for bi in 0..<40 { for ti in 0..<60 {
+                let beta = Double(bi) / 39 * .pi, theta = Double(ti) / 60 * 2 * .pi
+                let X = headCentre + V(headAxes.x * sin(beta) * cos(theta), headAxes.y * cos(beta), headAxes.z * sin(beta) * sin(theta))
+                let c = R * X + pose.t
+                g.fillEllipse(in: CGRect(x: ccx + 950 * c.x / -c.z - 1.5, y: ccy + 950 * c.y / -c.z - 1.5, width: 3, height: 3))
+            } }
+            g.setFillColor(C(30, 30, 30))
+            for X in facePoints {
+                let c = R * X + pose.t
+                g.fillEllipse(in: CGRect(x: ccx + 950 * c.x / -c.z - 5, y: ccy + 950 * c.y / -c.z - 5, width: 10, height: 10))
+            }
+        }
+        guard let base = g.makeImage() else { return }
+        var img = CIImage(cgImage: base)
+        for (pose, ccx, ccy) in shots {
+            hat.f = 950; hat.cx = ccx; hat.cy = ccy
+            for behind in [true, false] { if let h = hat.render(pose, alpha: 1, behind: behind) { img = h.composited(over: img) } }
+        }
+        write(img.cropped(to: CGRect(x: 0, y: 0, width: W, height: H)), "hoveder.png")
+    }
+}
