@@ -67,9 +67,11 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
         guard active, let scene else { return }
         let t0 = CACurrentMediaTime()
-        let img = scene.renderSceneImage()
-        statBg += CACurrentMediaTime() - t0; statBgN += 1
-        lock.lock(); background = img.map { CIImage(cgImage: $0) }; lock.unlock()
+        autoreleasepool {
+            let img = scene.renderSceneImage()
+            statBg += CACurrentMediaTime() - t0; statBgN += 1
+            lock.lock(); background = img.map { CIImage(cgImage: $0) }; lock.unlock()
+        }
     }
 
     var wantsScene: Bool { active }
@@ -141,6 +143,15 @@ final class VirtualCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     // ------------------------------------------------------------------ compositing (videoQueue)
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Each frame makes several images (cutout, hat, beard, suit). The capture queue does not reliably drain
+        // autoreleased objects between frames, and Core Image keeps a cache entry (with an IOSurface) for every
+        // new image it sees: together that grew to tens of GB in an hour. So every frame runs in its own pool,
+        // and the cache is emptied regularly.
+        autoreleasepool { processFrame(sampleBuffer) }
+        if frameCount % 30 == 0 { ciContext.clearCaches() }
+    }
+
+    private func processFrame(_ sampleBuffer: CMSampleBuffer) {
         guard let camera = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lock.lock(); let bg = background; lock.unlock()
         frameCount += 1
