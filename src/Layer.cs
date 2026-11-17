@@ -147,7 +147,7 @@ namespace JuleHygge
             taskbarY = scr.WorkingArea.Bottom - ScreenBounds.Top;
             groundY = taskbarY;
             S = Math.Max(0.6f, H / 1080f);
-            using (var sg = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, sg.DpiX / 96f);
+            dpiScale = Math.Max(1f, Program.DpiScaleAt(ScreenBounds));
 
             var bih = new BITMAPINFOHEADER();
             bih.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));

@@ -198,8 +198,6 @@ namespace JuleHygge
 
             if (Cfg.FirstRun == DateTime.MinValue) { Cfg.FirstRun = JuleClock.Today; Cfg.Save(); }
 
-            // window-snow sizes come from macOS points, scaled by the system DPI
-            using (var sg = Graphics.FromHwnd(IntPtr.Zero)) Ledge.U = Math.Max(1f, sg.DpiX / 96f);
 
             // three tunes for Santa; each trip picks one at random
             jingles = new Voice[Synth.Tune.All.Length];
@@ -240,6 +238,10 @@ namespace JuleHygge
         {
             foreach (var l in layers) { l.Close(); l.Dispose(); }
             layers.Clear();
+            // window-snow sizes come from macOS points, scaled by the primary screen's DPI;
+            // docking or undocking can change it, and the piles' column width depends on it
+            float u = Math.Max(1f, Program.DpiScaleAt(Screen.PrimaryScreen.Bounds));
+            if (u != Ledge.U) { Ledge.U = u; Ledges.Clear(); LedgeList.Clear(); Clumps.Clear(); }
             foreach (var s in Screen.AllScreens)
             {
                 if (!Cfg.AllScreens && !s.Primary) continue;

@@ -14,7 +14,7 @@ namespace JuleHygge
     // sizes are in points, here they are scaled by the system DPI (Ledge.U).
     sealed class Ledge
     {
-        public static float U = 1;                      // pixels per macOS point (system DPI / 96)
+        public static float U = 1;                      // pixels per macOS point (primary screen DPI / 96)
         public static float Step { get { return 4 * U; } }
 
         public readonly long Id;

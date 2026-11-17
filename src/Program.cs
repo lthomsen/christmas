@@ -8,6 +8,32 @@ namespace JuleHygge
     static class Program
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(System.Drawing.Point pt, uint flags);
+        [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+
+        // Per-monitor DPI awareness (v2) keeps every coordinate in physical pixels on every screen.
+        // With only system awareness, a screen whose DPI differs from the DPI at app start (e.g. external
+        // monitors docked after the laptop screen) gets scaled coordinates, while DWM window bounds stay
+        // physical, so window snow ended up beside the windows.
+        static void SetDpiAwareness()
+        {
+            try { if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return; } catch { }   // PER_MONITOR_AWARE_V2, Windows 10 1703+
+            try { SetProcessDPIAware(); } catch { }
+        }
+
+        // The scale factor (DPI / 96) of the monitor that holds the centre of the given screen rectangle.
+        public static float DpiScaleAt(System.Drawing.Rectangle r)
+        {
+            try
+            {
+                uint x, y;
+                var mon = MonitorFromPoint(new System.Drawing.Point(r.X + r.Width / 2, r.Y + r.Height / 2), 2);   // MONITOR_DEFAULTTONEAREST
+                if (mon != IntPtr.Zero && GetDpiForMonitor(mon, 0, out x, out y) == 0 && x > 0) return x / 96f;   // MDT_EFFECTIVE_DPI
+            }
+            catch { }
+            using (var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero)) return g.DpiX / 96f;
+        }
 
         // Test flags run the app directly, without the restart supervisor.
         static readonly string[] TestFlags = { "--kalender", "--julemand", "--sneplov", "--effekt", "--lyd-test" };
@@ -73,7 +99,7 @@ namespace JuleHygge
             using (var mutex = new System.Threading.Mutex(true, "JuleHygge_SingleInstance", out createdNew))
             {
                 if (!createdNew) return;
-                try { SetProcessDPIAware(); } catch { }
+                SetDpiAwareness();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 // A decoration must never pop up crash dialogs: log UI-thread exceptions and keep running.
