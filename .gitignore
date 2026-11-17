@@ -9,3 +9,6 @@ macos/build/
 macos/JuleHygge.xcodeproj/xcuserdata/
 macos/JuleHygge.xcodeproj/project.xcworkspace/
 obj/
+
+# Testoutput og fejlsøgningsbilleder fra kameraet (kan vise personer)
+build-test/

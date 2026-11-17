@@ -54,6 +54,8 @@ final class Sprite: NSObject, CALayerDelegate {
 /// A pool of image layers (snowflakes, sparks, snow chunks) reused from frame to frame.
 final class DotPool {
     private let parent = CALayer()
+    /// The layer holding all of this pool's images (e.g. to draw it separately).
+    var container: CALayer { parent }
     private var layers: [CALayer] = []
     private var used = 0
     private let screenHeight: F
@@ -277,6 +279,28 @@ final class ScreenOverlay {
     /// Renders the virtual screen to an image (camera background). The layer tree is walked and drawn by hand:
     /// CALayer.render(in:) creates an offscreen buffer for every layer with transparency, which made ~260
     /// snowflakes take ~900 ms per frame. Drawn directly, each flake is one image draw with an alpha value.
+    /// Layers drawn in front of the person in the camera picture: the snow pile, the snowman, the nisser, the plow and its spray.
+    private var foregroundLayers: [CALayer] { [snowmanSprite.layer, groundFill, groundLine, nisseLayer, plowBitPool.container, plowSprite.layer] }
+
+    /// The camera scene in two images: everything behind the person (sky, lights, snowfall, Santa) and, with a
+    /// transparent background, what stands in front of the person (see `foregroundLayers`).
+    func renderSceneImages() -> (back: CGImage?, front: CGImage?) {
+        let w = Int(W), h = Int(H)
+        func context() -> CGContext? {
+            let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+            ctx?.interpolationQuality = .low
+            return ctx
+        }
+        let front = Set(foregroundLayers.map { ObjectIdentifier($0) })
+        guard let b = context(), let f = context() else { return (nil, nil) }
+        Self.drawTree(root, into: b, alpha: 1, skip: front)
+        // the root sits at the origin with no transform, so its sublayers can be drawn on their own
+        for l in root.sublayers ?? [] where front.contains(ObjectIdentifier(l)) { Self.drawTree(l, into: f, alpha: 1) }
+        return (b.makeImage(), f.makeImage())
+    }
+
     func renderSceneImage() -> CGImage? {
         let w = Int(W), h = Int(H)
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -289,8 +313,8 @@ final class ScreenOverlay {
 
     /// Draws a layer and its sublayers (the kinds this app uses: images, sprites, shapes, a gradient).
     /// The context is y-up, like the layers.
-    private static func drawTree(_ l: CALayer, into g: CGContext, alpha: CGFloat) {
-        if l.isHidden || l.opacity <= 0 { return }
+    private static func drawTree(_ l: CALayer, into g: CGContext, alpha: CGFloat, skip: Set<ObjectIdentifier> = []) {
+        if l.isHidden || l.opacity <= 0 || skip.contains(ObjectIdentifier(l)) { return }
         let a = alpha * CGFloat(l.opacity)
         g.saveGState()
         g.translateBy(x: l.position.x, y: l.position.y)
@@ -313,7 +337,7 @@ final class ScreenOverlay {
         } else if let sprite = l.delegate as? Sprite {
             sprite.draw(l, in: g)
         }
-        for sub in l.sublayers ?? [] { drawTree(sub, into: g, alpha: a) }
+        for sub in l.sublayers ?? [] { drawTree(sub, into: g, alpha: a, skip: skip) }
         g.restoreGState()
     }
 

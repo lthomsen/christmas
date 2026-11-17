@@ -39,8 +39,19 @@ if let a = args.first(where: { $0.hasPrefix("--nissehue-test=") }) {
     NisseHat.test(dir: parts[0], image: parts.count > 1 ? parts[1] : nil)
     exit(0)
 }
+// --kamera-replay=DIR: runs hat, beard and suit again on the camera pictures saved there by --kamera-debug, and quits.
+if let a = args.first(where: { $0.hasPrefix("--kamera-replay=") }) {
+    NisseHat.replay(dir: String(a.dropFirst(16)))
+    exit(0)
+}
+// --nissedragt-test=DIR,IMAGE: puts the camera's nisse beard and suit on the person in a photo, and quits.
+if let a = args.first(where: { $0.hasPrefix("--nissedragt-test=") }) {
+    let parts = a.dropFirst(18).split(separator: ",", maxSplits: 1).map(String.init)
+    if parts.count == 2 { NisseCostume.test(dir: parts[0], image: parts[1]) }
+    exit(0)
+}
 let isChild = ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil
-let testFlags = ["--nissehue-test", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
+let testFlags = ["--nissehue-test", "--kamera-replay", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
 let wantsSupervisor = !isChild && ProcessInfo.processInfo.environment["JULE_NO_SUPERVISOR"] == nil
     && !args.dropFirst().contains(where: { a in testFlags.contains(where: { a.hasPrefix($0) }) })
 if wantsSupervisor {
