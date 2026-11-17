@@ -38,17 +38,22 @@ namespace JuleHygge
         // Test flags run the app directly, without the restart supervisor.
         static readonly string[] TestFlags = { "--kalender", "--julemand", "--sneplov", "--effekt", "--lyd-test" };
 
+        // The exe path at start; captured once because an update renames the running file.
+        public static string ExePath;
+        public static bool IsChild;
+
         [STAThread]
         static void Main(string[] args)
         {
+            ExePath = Application.ExecutablePath;
             // --lyd-test=DIR: write the synthesized sounds as WAV files (to listen to them) and quit.
             foreach (var a in args)
                 if (a.StartsWith("--lyd-test=")) { Synth.WriteTestFiles(a.Substring(11)); return; }
 
-            bool isChild = Environment.GetEnvironmentVariable("JULE_SUPERVISOR") != null;
+            IsChild = Environment.GetEnvironmentVariable("JULE_SUPERVISOR") != null;
             bool testRun = false;
             foreach (var a in args) foreach (var f in TestFlags) if (a.StartsWith(f)) testRun = true;
-            if (!isChild && !testRun && Environment.GetEnvironmentVariable("JULE_NO_SUPERVISOR") == null)
+            if (!IsChild && !testRun && Environment.GetEnvironmentVariable("JULE_NO_SUPERVISOR") == null)
             {
                 Supervise(args);
                 return;
@@ -59,18 +64,30 @@ namespace JuleHygge
         // The app first starts as a small watchdog that runs the real app as a child process and restarts it if
         // it crashes (after 5 s; it gives up after 3 crashes within a minute of each start). A normal quit
         // ("Afslut") exits with code 0, and then the watchdog quits too. Ported from macos/.../main.swift.
+        // Exit code Updater.RestartExitCode means the child installed a new exe: the watchdog then starts the
+        // new exe (which becomes the new watchdog) and quits, so both processes run the new version.
         static void Supervise(string[] args)
+        {
+            var cmd = new System.Text.StringBuilder();
+            foreach (var a in args) cmd.Append(cmd.Length > 0 ? " " : "").Append(a.IndexOf(' ') >= 0 ? "\"" + a + "\"" : a);
+            if (SuperviseLoop(cmd.ToString()))
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(ExePath, cmd.ToString()) { UseShellExecute = false }); }
+                catch (Exception ex) { ErrorLog.Write(ex); }
+            }
+        }
+
+        // Returns true when the child asked for a restart after an update (the mutex is released by then).
+        static bool SuperviseLoop(string cmd)
         {
             bool createdNew;
             using (var mutex = new System.Threading.Mutex(true, "JuleHygge_Supervisor", out createdNew))
             {
-                if (!createdNew) return;   // already running
-                var cmd = new System.Text.StringBuilder();
-                foreach (var a in args) cmd.Append(cmd.Length > 0 ? " " : "").Append(a.IndexOf(' ') >= 0 ? "\"" + a + "\"" : a);
+                if (!createdNew) return false;   // already running
                 int quickCrashes = 0;
                 while (true)
                 {
-                    var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath, cmd.ToString());
+                    var psi = new System.Diagnostics.ProcessStartInfo(ExePath, cmd);
                     psi.UseShellExecute = false;
                     psi.EnvironmentVariables["JULE_SUPERVISOR"] = System.Diagnostics.Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
                     var started = DateTime.Now;
@@ -83,11 +100,12 @@ namespace JuleHygge
                             code = child.ExitCode;
                         }
                     }
-                    catch (Exception ex) { ErrorLog.Write(ex); return; }
-                    if (code == 0) return;   // normal quit
+                    catch (Exception ex) { ErrorLog.Write(ex); return false; }
+                    if (code == 0) return false;   // normal quit
+                    if (code == Updater.RestartExitCode) { mutex.ReleaseMutex(); return true; }
                     ErrorLog.Write("JuleHygge stoppede uventet (kode " + code + "); genstarter");
                     quickCrashes = (DateTime.Now - started).TotalSeconds < 60 ? quickCrashes + 1 : 0;
-                    if (quickCrashes >= 3) { ErrorLog.Write("supervisor: crasher igen og igen, giver op"); return; }
+                    if (quickCrashes >= 3) { ErrorLog.Write("supervisor: crasher igen og igen, giver op"); return false; }
                     System.Threading.Thread.Sleep(5000);
                 }
             }
@@ -98,6 +116,12 @@ namespace JuleHygge
             bool createdNew;
             using (var mutex = new System.Threading.Mutex(true, "JuleHygge_SingleInstance", out createdNew))
             {
+                // right after an update without a supervisor, the old process may still be shutting down
+                if (!createdNew && Environment.GetEnvironmentVariable("JULE_AFTER_UPDATE") != null)
+                {
+                    try { createdNew = mutex.WaitOne(15000); }
+                    catch (System.Threading.AbandonedMutexException) { createdNew = true; }
+                }
                 if (!createdNew) return;
                 SetDpiAwareness();
                 Application.EnableVisualStyles();

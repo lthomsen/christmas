@@ -1,0 +1,62 @@
+# Builds JuleHygge.exe with build.ps1 on every push to main and every pull request (kept as a workflow
+# artifact, version 0.0.0), and for a published release: then the exe is stamped with the release tag
+# (v1.4.0 -> 1.4.0) and attached to the release. The app's self-update only installs an exe whose version
+# matches its release tag, so release exes must come from this workflow, not from a local build.
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to upload the exe to the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $v = '0.0.0'
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            if ($env:TAG -notmatch '^v?(\d+\.\d+\.\d+)$') { Write-Error "Release tag '$env:TAG' is not like v1.2.3"; exit 1 }
+            $v = $Matches[1]
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build JuleHygge.exe
+        shell: powershell   # Windows PowerShell 5.1, like on the developer machine
+        run: .\build.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Check
+        shell: pwsh
+        run: |
+          $info = (Get-Item JuleHygge.exe).VersionInfo
+          "FileVersion: $($info.FileVersion)  ProductVersion: $($info.ProductVersion)"
+          if ($info.ProductVersion -ne '${{ steps.ver.outputs.version }}') { Write-Error 'Version stamp missing'; exit 1 }
+          Get-FileHash JuleHygge.exe -Algorithm SHA256 | Format-List Algorithm, Hash
+
+      - name: Keep as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JuleHygge-windows
+          path: JuleHygge.exe
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$env:TAG" JuleHygge.exe --clobber

@@ -20,6 +20,7 @@ Et lille juleoverlay til Windows og macOS: snevejr, sne der lægger sig på proc
 - **Stops completely** while the PC is locked, suspended, the display is off or the screen saver runs. Santa's trip and the plow run end at once (as if they had arrived) and the sound stops.
 - **Sound** (off by default, switched on separately in the menu): sleigh bells and one of three public-domain tunes for Santa — "Jingle Bells" (Pierpont 1857), "Deck the Halls" or "We Wish You a Merry Christmas" — played a little faster or slower with Santa's ±10% pace; engine, scraping and horn for the snow plow. Panned with the figure across the screens and synthesized in code (no sound files).
 - **Restarts itself after a crash:** a small supervisor process runs the app and restarts it after 5 s (it gives up after 3 quick crashes). Quitting from the menu closes both, so two `JuleHygge.exe` processes are expected.
+- **Updates itself:** a release build checks GitHub releases 1 minute after start and then every 6 hours. A newer `JuleHygge.exe` is downloaded next to the running one, checked (GitHub's SHA-256 digest, and its version must match the release tag), swapped in, and the app restarts into it. Menu: *Opdatér automatisk* (on by default) and *Søg efter opdatering nu*. Local builds are version 0.0.0 and never update. The exe must sit in a folder the user can write to.
 
 ## macOS
 Se [macos/README.md](macos/README.md) — native Swift-udgave i menulinjen med samme figurer og julekalender. Byg med `macos/build.sh`.
@@ -53,6 +54,9 @@ Al grafik tegnes i koden, så der ikke er billedfiler.
 | `JULE_DEEPSNOW=1` | starts with a full snow drift (for testing the snow plow) |
 | `JULE_NISSE_SECONDS=N` | nisser arrive/leave every N seconds |
 | `JULE_NO_SUPERVISOR=1` | runs without the restart supervisor (test flags also skip it) |
+| `JULE_UPDATE_VERSION=x.y.z` | pretends to be this version when checking for updates |
+
+**Releases:** `.github/workflows/windows-build.yml` builds the exe on every push and pull request, and for a published release builds it with the tag as version (`build.ps1 -Version 1.4.0`) and attaches it. So create a release without files (`gh release create v1.4.0 --notes-file ...`); both workflows attach their builds within a few minutes.
 
 ## Kode
 
@@ -66,6 +70,7 @@ Al grafik tegnes i koden, så der ikke er billedfiler.
 | `src/Sound.cs` | Sound synthesis (jingle, snow plow) and `waveOut` playback on its own thread |
 | `src/PowerWatcher.cs` | Detects when the display turns off or on |
 | `src/WindowSnow.cs` | Snow on other apps' window edges: window scan, piles, drapes, falling clumps |
+| `src/Updater.cs` | Self-update from GitHub releases: check, download, verify, swap the exe |
 
 ## Ideer til næste version
 - Sne der lægger sig på toppen af åbne vinduer

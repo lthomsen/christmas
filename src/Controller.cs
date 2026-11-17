@@ -215,6 +215,7 @@ namespace JuleHygge
             BuildTray();
             BuildLayers();
             UpdateDaily(true);
+            StartUpdater();
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -805,6 +806,18 @@ namespace JuleHygge
             menu.Items.Add(autostart);
             menu.Items.Add(new ToolStripSeparator());
 
+            var version = new ToolStripMenuItem(Updater.IsReleaseBuild ? "Version " + Updater.Display(Updater.Current) : "Udviklerversion (opdaterer ikke)");
+            version.Enabled = false;
+            menu.Items.Add(version);
+            if (Updater.IsReleaseBuild)
+            {
+                menu.Items.Add(Toggle("Opdatér automatisk", () => Cfg.AutoUpdate, v => Cfg.AutoUpdate = v));
+                var checkNow = new ToolStripMenuItem("Søg efter opdatering nu");
+                checkNow.Click += (s, e) => CheckForUpdate(true);
+                menu.Items.Add(checkNow);
+            }
+            menu.Items.Add(new ToolStripSeparator());
+
             var exit = new ToolStripMenuItem("Afslut");
             exit.Click += (s, e) => Exit();
             menu.Items.Add(exit);
@@ -858,6 +871,7 @@ namespace JuleHygge
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             if (powerWatcher != null) powerWatcher.Dispose();
             if (saverTimer != null) { saverTimer.Stop(); saverTimer.Dispose(); }
+            if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); }
             if (calendar != null && !calendar.IsDisposed) calendar.Close();
             foreach (var l in layers) { l.Close(); l.Dispose(); }
             layers.Clear();
@@ -879,6 +893,89 @@ namespace JuleHygge
         }
 
         bool syncingMenu;
+
+        // ------------------------------------------------------------------ automatic update
+        // A release build checks GitHub 1 minute after start and then every 6 hours. A newer release is
+        // downloaded, checked and swapped in, and the app restarts into it (see Updater).
+        Timer updateTimer;
+        bool updateRunning;
+
+        void StartUpdater()
+        {
+            if (!Updater.IsReleaseBuild) return;
+            string now = Updater.Display(Updater.Current);
+            if (Cfg.LastVersion != now)
+            {
+                if (Cfg.LastVersion != "")
+                {
+                    balloonOpensCalendar = false;
+                    tray.ShowBalloonTip(6000, "Jule-hygge er opdateret", "Du kører nu version " + now + ".", ToolTipIcon.None);
+                }
+                Cfg.LastVersion = now;
+                Cfg.Save();
+            }
+            updateTimer = new Timer();
+            updateTimer.Interval = 60 * 1000;
+            updateTimer.Tick += (s, e) =>
+            {
+                updateTimer.Interval = 6 * 60 * 60 * 1000;
+                if (Cfg.AutoUpdate) CheckForUpdate(false);
+            };
+            updateTimer.Start();
+        }
+
+        // manual = the user asked from the menu, so report every outcome with a balloon.
+        void CheckForUpdate(bool manual)
+        {
+            if (updateRunning) return;
+            updateRunning = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                var r = Updater.CheckAndDownload();
+                try { invoker.BeginInvoke(new Action(() => FinishUpdate(r, manual))); }
+                catch (InvalidOperationException) { }   // shutting down
+            });
+        }
+
+        void FinishUpdate(Updater.Result r, bool manual)
+        {
+            updateRunning = false;
+            balloonOpensCalendar = false;
+            if (r.Error != null)
+            {
+                ErrorLog.Write("update failed: " + r.Error);
+                if (manual) tray.ShowBalloonTip(6000, "Opdatering", "Kunne ikke opdatere: " + r.Error, ToolTipIcon.None);
+                return;
+            }
+            if (r.NewExe == null)
+            {
+                if (manual) tray.ShowBalloonTip(4000, "Opdatering", "Du har den nyeste version (" + Updater.Display(Updater.Current) + ").", ToolTipIcon.None);
+                return;
+            }
+            try { Updater.Install(r.NewExe); }
+            catch (Exception ex)
+            {
+                ErrorLog.Write(ex);
+                if (manual) tray.ShowBalloonTip(6000, "Opdatering", "Kunne ikke installere version " + Updater.Display(r.Version) + ": " + ex.Message, ToolTipIcon.None);
+                return;
+            }
+            ErrorLog.Debug("update: installed " + Updater.Display(r.Version) + ", restarting");
+            // Under the supervisor, a special exit code makes it start the new exe. Without one, start it here;
+            // it waits for this process to let go of the single-instance mutex.
+            if (Program.IsChild) Environment.ExitCode = Updater.RestartExitCode;
+            else
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(Program.ExePath);
+                    psi.UseShellExecute = false;
+                    psi.EnvironmentVariables["JULE_AFTER_UPDATE"] = "1";
+                    System.Diagnostics.Process.Start(psi);
+                }
+                catch (Exception ex) { ErrorLog.Write(ex); }
+            }
+            Exit();
+        }
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         static string AutostartCommand { get { return "\"" + Application.ExecutablePath + "\""; } }

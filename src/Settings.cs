@@ -16,6 +16,8 @@ namespace JuleHygge
         public int PowerSave = 2;          // 0 = off, 1 = always on, 2 = only on battery
         public int SoundLevel = 1;         // 0 = low, 1 = medium, 2 = high
         public int FrameRate = 20;         // frames/s while the scene is calm: 12, 20, 30 or 60 (same default as macOS)
+        public bool AutoUpdate = true;     // install new GitHub releases by itself
+        public string LastVersion = "";  // the version that ran last time, to announce an update
         public int SnowmanSeenStage = 0;
         public int CalendarYear = 0;
         public DateTime FirstRun = DateTime.MinValue, LastDoorNotice = DateTime.MinValue;
@@ -76,6 +78,8 @@ namespace JuleHygge
             s.SnowLevel = Math.Max(0, Math.Min(2, I(d, "SnowLevel", s.SnowLevel)));
             s.NisseCount = Math.Max(1, Math.Min(12, I(d, "NisseCount", s.NisseCount)));
             s.PowerSave = Math.Max(0, Math.Min(2, I(d, "PowerSave", s.PowerSave)));
+            s.AutoUpdate = B(d, "AutoUpdate", s.AutoUpdate);
+            string lv; if (d.TryGetValue("LastVersion", out lv)) s.LastVersion = lv;
             s.SnowmanSeenStage = I(d, "SnowmanSeenStage", 0);
             s.CalendarYear = I(d, "CalendarYear", 0);
             s.FirstRun = D(d, "FirstRun");
@@ -104,7 +108,7 @@ namespace JuleHygge
                     "Snow=" + B(Snow), "SnowGround=" + B(SnowGround), "Santa=" + B(Santa),
                     "Nisser=" + B(Nisser), "Lights=" + B(Lights), "PauseFullscreen=" + B(PauseFullscreen),
                     "Snowman=" + B(Snowman), "AllScreens=" + B(AllScreens), "Plow=" + B(Plow), "WindowSnow=" + B(WindowSnow), "Sound=" + B(Sound), "PlowSound=" + B(PlowSound), "SoundLevel=" + SoundLevel,
-                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave, "FrameRate=" + FrameRate,
+                    "SnowLevel=" + SnowLevel, "NisseCount=" + NisseCount, "PowerSave=" + PowerSave, "FrameRate=" + FrameRate, "AutoUpdate=" + B(AutoUpdate), "LastVersion=" + LastVersion,
                     "SnowmanSeenStage=" + SnowmanSeenStage, "CalendarYear=" + CalendarYear,
                     "FirstRun=" + Ds(FirstRun), "LastDoorNotice=" + Ds(LastDoorNotice),
                     "OpenedDoors=" + string.Join(",", OpenedDoors.OrderBy(x => x)) });

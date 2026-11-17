@@ -13,7 +13,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Miljøvariablen `JULE_DATE=yyyy-MM-dd` får programmet til at tro, at det er en anden dato.
 - **Pas på:** En test med en falsk dato skriver åbnede låger og snemandens trin til den rigtige `%APPDATA%\JuleHygge\settings.ini`. Tag en backup af filen før testen, og sæt den tilbage bagefter.
 - Prefer `JULE_SETTINGS=<path>` for tests: it points the app at another settings file, so the real one is never touched.
-- Other Windows test aids (same as macOS): `--julemand`, `--effekt=N`, `--sneplov[=N]`, `--lyd-test=DIR` (writes the synthesized sounds as WAV + `summary.txt`), `JULE_DEBUG=1` (`%TEMP%\julehygge-debug.log`), `JULE_FPS=N`, `JULE_DEEPSNOW=1`, `JULE_NISSE_SECONDS=N`, `JULE_NO_SUPERVISOR=1`.
+- Other Windows test aids (same as macOS): `--julemand`, `--effekt=N`, `--sneplov[=N]`, `--lyd-test=DIR` (writes the synthesized sounds as WAV + `summary.txt`), `JULE_DEBUG=1` (`%TEMP%\julehygge-debug.log`), `JULE_FPS=N`, `JULE_DEEPSNOW=1`, `JULE_NISSE_SECONDS=N`, `JULE_NO_SUPERVISOR=1`, `JULE_UPDATE_VERSION=x.y.z` (pretend to be that version when checking for updates).
 - Normal starts run under a restart supervisor (a second `JuleHygge.exe` process). Test flags skip it. `Stop-Process -Name JuleHygge` stops both.
 - Der er ingen automatiske tests. Kontrollér visuelt med skærmbilleder. `CopyFromScreen` fanger overlay-vinduerne, og processen skal være DPI-aware, ellers bliver koordinaterne forkerte.
 
@@ -35,7 +35,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 
 ## Git
 - Git og `gh` er installeret, men ligger måske ikke på PATH i ældre shells. Brug i så fald `C:\Program Files\Git\cmd\git.exe` og `C:\Program Files\GitHub CLI\gh.exe`.
-- Remote: `rkl1976/christmas` on GitHub. Releases are created with `gh release create` and include the built `JuleHygge.exe`.
+- Remote: `rkl1976/christmas` on GitHub. Create releases with `gh release create vX.Y.Z --notes-file ...` and **no files**: the Windows and macOS workflows build and attach `JuleHygge.exe` and `JuleHygge-macOS.zip`. Never upload a local build: the app's self-update (`src/Updater.cs`) only installs an exe whose version matches the release tag, and local builds are 0.0.0.
 
 ## macOS (`macos/`)
 - Byg med `macos/build.sh` (Swift Package + `.app`-bundle, ad-hoc-signeret). Luk appen først: `pkill -x JuleHygge`.

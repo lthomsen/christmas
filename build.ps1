@@ -1,6 +1,10 @@
 # Builds JuleHygge.exe with the C# compiler that ships with Windows (.NET Framework 4.x).
 # The app icon is drawn here at build time, so the repo contains no image files.
+# -Version x.y.z stamps the exe (the GitHub workflow passes the release tag). Without it the exe is 0.0.0,
+# a development build that never updates itself.
+param([string]$Version = '0.0.0')
 $ErrorActionPreference = 'Stop'
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { Write-Error "Version must look like 1.2.3, got '$Version'"; exit 1 }
 Add-Type -AssemblyName System.Drawing
 
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -87,9 +91,22 @@ function Write-Ico([string]$path, [int[]]$sizes) {
 
 Write-Ico $ico @(16, 24, 32, 48, 64, 256)
 
+# Version attributes, generated so the version lives only in the release tag.
+$obj = Join-Path $PSScriptRoot 'obj'
+New-Item -ItemType Directory -Force $obj | Out-Null
+$versionFile = Join-Path $obj 'Version.cs'
+@"
+using System.Reflection;
+[assembly: AssemblyTitle("JuleHygge")]
+[assembly: AssemblyProduct("JuleHygge")]
+[assembly: AssemblyVersion("$Version.0")]
+[assembly: AssemblyFileVersion("$Version.0")]
+[assembly: AssemblyInformationalVersion("$Version")]
+"@ | Set-Content -Path $versionFile -Encoding UTF8
+
 & $csc /nologo /codepage:65001 /target:winexe /optimize+ /unsafe /platform:anycpu /out:$out `
     /win32icon:$ico `
-    /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    (Join-Path $PSScriptRoot 'src\*.cs')
+    /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll `
+    (Join-Path $PSScriptRoot 'src\*.cs') $versionFile
 if ($LASTEXITCODE -ne 0) { Write-Error "Build failed"; exit 1 }
-Write-Host "Built: $out"
+Write-Host "Built: $out (version $Version)"
