@@ -3,6 +3,7 @@
 
 mod clock;
 mod controller;
+mod figures;
 mod icon;
 mod layer;
 mod log;
@@ -20,7 +21,7 @@ pub const VERSION: &str = env!("APP_VERSION");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut opts = controller::Options { snapshot: None };
+    let mut opts = controller::Options::default();
     for a in &args {
         if a == "--version" {
             println!("JuleHygge {VERSION}");
@@ -32,6 +33,16 @@ fn main() {
                 _ => (v, 5.0),
             };
             opts.snapshot = Some((PathBuf::from(dir), secs));
+        } else if a == "--santa" || a == "--julemand" {
+            opts.santa = true;
+        } else if a == "--plow" || a == "--sneplov" {
+            // --plow sends the snow plow after 3 s, --plow=N after N seconds (the Danish names work too)
+            opts.plow_after = Some(3.0);
+        } else if let Some(v) = a.strip_prefix("--plow=").or_else(|| a.strip_prefix("--sneplov=")) {
+            match v.parse::<f32>() {
+                Ok(secs) => opts.plow_after = Some(secs),
+                Err(_) => eprintln!("JuleHygge: {a}: not a number of seconds"),
+            }
         } else {
             eprintln!("JuleHygge: unknown argument {a}");
         }

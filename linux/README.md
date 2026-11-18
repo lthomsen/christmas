@@ -3,11 +3,13 @@
 A native Rust version of JuleHygge for **Ubuntu 22.04+** and **Linux Mint 21+**. The plan, the design choices and
 the phases are in [docs/linux-plan.md](../docs/linux-plan.md).
 
-> **Status: phase 2 (ground and stopping).** Snowflake icon in the panel with *Afslut*, one transparent
-> click-through overlay per monitor, falling snow (dots and crystals, wind, changing weather), and a snow pile on
-> top of the bottom panel (or the screen bottom) with storm drifts. A fullscreen app pauses its screen; a lock,
-> the screen saver or a switched-off display stops everything; power-save follows the battery. There are no
-> figures, calendar, sound or full menu yet (settings are changed in `settings.ini`).
+> **Status: phase 3 (figures).** Snowflake icon in the panel with *Afslut*, one transparent click-through overlay
+> per monitor, falling snow (dots and crystals, wind, changing weather), and a snow pile on top of the bottom panel
+> (or the screen bottom) with storm drifts. Christmas lights, elves (walking between screens, meeting to swap
+> gifts), the snowman (one step more each day), the snow plow and Santa with his reindeer across neighbouring
+> screens. A fullscreen app pauses its screen; a lock, the screen saver or a switched-off display stops
+> everything; power-save follows the battery. There is no calendar, sound or full menu yet (settings are changed
+> in `settings.ini`).
 
 ## Build
 
@@ -38,13 +40,16 @@ Only one JuleHygge runs per session (lock file `$XDG_RUNTIME_DIR/julehygge.lock`
 |---|---|
 | `--snapshot=DIR[,SEC]` | after SEC seconds (default 5) writes each screen's overlay over a dark background as `DIR/screenN.png`; also works without a compositor (e.g. Xvfb) |
 | `--version` | prints the version |
+| `--santa` (`--julemand`) | sends Santa right away |
+| `--plow[=N]` (`--sneplov[=N]`) | sends the snow plow after N seconds (default 3) |
 | `JULE_SETTINGS=path` | uses another settings file, so tests never change the real one |
 | `JULE_DATE=yyyy-MM-dd` | pretends it is another date (weather now; calendar and snowman later) |
 | `JULE_WEATHER_TIME=HH:MM` | starts the day's weather at that time of day, to watch a change without waiting (the macOS name `JULE_VEJR_TID` works too) |
 | `JULE_DEBUG=1` | debug lines in `$XDG_RUNTIME_DIR/julehygge-debug.log`, including fps, ms per frame and CPU % every 5 s |
 | `JULE_FPS=N` | fixed frame rate (for measurements) |
 | `JULE_SCALE=N` | overrides the desktop scale factor (otherwise `Xft.dpi / 96`) |
-| `JULE_DEEPSNOW=1` | starts with a full snow pile |
+| `JULE_DEEPSNOW=1` | starts with a full snow pile (the plow comes by itself after 20 s) |
+| `JULE_ELF_SECONDS=N` (`JULE_NISSE_SECONDS`) | an elf arrives or leaves every N seconds instead of every 1½–3 minutes |
 | `JULE_NO_SHM=1` | sends pixels through the socket instead of MIT-SHM shared memory (to compare, or to rule it out) |
 
 Settings: `~/.config/JuleHygge/settings.ini`, same keys as on Windows. Errors: `~/.local/state/JuleHygge/error.log`.
@@ -73,6 +78,8 @@ On **Linux Mint** and on **Ubuntu 24.04 or newer (Wayland)**:
 | `src/main.rs` | arguments, single instance | `Program.cs` |
 | `src/controller.rs` | main loop, frame timer, wind, weather, screens, test aids | `Controller.cs` |
 | `src/layer.rs` | one screen's scene and pixel buffer: snow, snow pile, fullscreen pause, dirty rectangles | `Layer.cs` |
+| `src/layer/*.rs` | the figures on a screen: lights, Santa and sparks, snowman, snow plow, elves; Cairo helpers | `Layer.cs` |
+| `src/figures.rs` | Santa, sparks and the plow run in global coordinates, across screens | `Controller.cs` |
 | `src/x11.rs` | X11: monitors, overlay windows, click-through, MIT-SHM, panels, fullscreen window, DPMS | Win32 parts of `Layer.cs` |
 | `src/session.rs` | lock and screen saver (D-Bus), battery | `SessionSwitch`, `PowerWatcher.cs` |
 | `src/tray.rs`, `src/icon.rs` | panel icon and menu; the icon drawn with Cairo | `NotifyIcon`, `build.ps1` |

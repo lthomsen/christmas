@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use x11rb::protocol::Event;
 
-use crate::layer::{Layer, PixelStore, Present, SceneState};
+use crate::figures::{Figures, ScreenInfo};
+use crate::layer::{Layer, PixelStore, Present, SceneState, SNOWMAN_MAX_STAGE};
 use crate::rng::Rng;
 use crate::session::SessionWatch;
 use crate::settings::Settings;
@@ -19,9 +20,14 @@ use crate::tray::{TrayHandle, TrayMsg};
 use crate::weather::Weather;
 use crate::x11::{Display, Monitor, OverlayWindow, Rect, Res};
 
+#[derive(Default)]
 pub struct Options {
     /// `--snapshot=DIR[,SEC]`: write each screen as a PNG after SEC seconds (default 5).
     pub snapshot: Option<(PathBuf, f32)>,
+    /// `--santa`: send Santa right away.
+    pub santa: bool,
+    /// `--plow[=N]`: send the snow plow after N seconds (default 3).
+    pub plow_after: Option<f32>,
 }
 
 struct Screen {
@@ -42,8 +48,13 @@ pub struct Controller {
     tray: Option<TrayHandle>,
     tray_rx: Receiver<TrayMsg>,
     snapshot: Option<(PathBuf, f32)>,
+    figures: Figures,
+    /// The snowman's stage today, 1..=12 (checked every 30 seconds, for the day changing at midnight).
+    snowman_stage: i32,
+    day_timer: f32,
 
-    time: f32,
+    /// Seconds since start, as a double (see `SceneState::time`).
+    time: f64,
     wind: f32,
     wind_target: f32,
     wind_timer: f32,
@@ -73,7 +84,7 @@ impl Controller {
         let display = Display::open()?;
         let mut cfg = Settings::load();
         if cfg.first_run.is_none() {
-            // the snowman is built over 12 days from the first start (phase 3)
+            // the snowman is built over 12 days from the first start
             cfg.first_run = Some(crate::clock::today());
             cfg.save();
         }
@@ -84,6 +95,7 @@ impl Controller {
         let session = crate::session::spawn();
         let snow_phase_a = rng.f64() * 2.0 * std::f64::consts::PI;
         let snow_phase_b = rng.f64() * 2.0 * std::f64::consts::PI;
+        let figures_seed = rng.next_u64();
         let mut c = Controller {
             display,
             cfg,
@@ -94,6 +106,9 @@ impl Controller {
             tray,
             tray_rx,
             snapshot: opts.snapshot,
+            figures: Figures::new(figures_seed),
+            snowman_stage: 1,
+            day_timer: 0.0,
             time: 0.0,
             wind: 0.0,
             wind_target: 0.0,
@@ -114,7 +129,15 @@ impl Controller {
             rebuild_in: None,
         };
         c.update_power_save();
+        c.update_snowman_stage();
         c.build_screens();
+        if opts.santa {
+            let screens = c.screen_infos();
+            c.figures.launch_santa(&screens);
+        }
+        if let Some(secs) = opts.plow_after {
+            c.figures.send_plow_after(0.0, secs);
+        }
         Ok(c)
     }
 
@@ -173,7 +196,39 @@ impl Controller {
             ));
             self.screens.push(Screen { layer, window, mapped: true });
         }
+        // the elves need to know where they can walk on to, and the plow names its screens by index
+        let rects: Vec<Rect> = self.screens.iter().map(|s| s.layer.rect).collect();
+        for (i, s) in self.screens.iter_mut().enumerate() {
+            s.layer.index = i;
+            s.layer.neighbor_left = crate::figures::neighbor(&rects, i, -1.0).is_some();
+            s.layer.neighbor_right = crate::figures::neighbor(&rects, i, 1.0).is_some();
+        }
+        self.figures.screens_changed();
         self.update_desktop();
+    }
+
+    /// The screens as the figures in global coordinates see them.
+    fn screen_infos(&self) -> Vec<ScreenInfo> {
+        self.screens
+            .iter()
+            .map(|s| ScreenInfo {
+                rect: s.layer.rect,
+                s: s.layer.scale(),
+                primary: s.layer.primary,
+                heap_average: s.layer.heap_average(),
+            })
+            .collect()
+    }
+
+    /// One more step each day from the first start, up to the finished snowman.
+    fn update_snowman_stage(&mut self) {
+        let today = crate::clock::today();
+        let days = self.cfg.first_run.map_or(0, |f| (today - f).num_days());
+        let stage = (days + 1).clamp(1, SNOWMAN_MAX_STAGE as i64) as i32;
+        if stage != self.snowman_stage {
+            crate::log::debug(&format!("snowman stage {stage}"));
+            self.snowman_stage = stage;
+        }
     }
 
     fn handle_event(&mut self, e: Event) {
@@ -205,7 +260,7 @@ impl Controller {
 
     /// Snowfall drifts between ~60% and ~140% of the chosen amount (two slow waves of about 3 and 7 minutes).
     fn snow_intensity(&self) -> f32 {
-        let t = self.time as f64;
+        let t = self.time;
         let tau = 2.0 * std::f64::consts::PI;
         (1.0 + 0.25 * (t * tau / 190.0 + self.snow_phase_a).sin() + 0.15 * (t * tau / 430.0 + self.snow_phase_b).sin())
             as f32
@@ -272,15 +327,15 @@ impl Controller {
         asleep
     }
 
-    /// Ends everything that is on its way, as if it had arrived, when the overlay stops (lock, screen saver,
-    /// display off) or frames stalled (e.g. after suspend): otherwise it stays "on the way" while nothing moves.
-    /// Phase 3 ends Santa's trip and the plow run here, phase 4 stops their sound (`FinishRuns()` on Windows).
+    /// Ends Santa's trip and the plow run, as if they had arrived, when the overlay stops (lock, screen saver,
+    /// display off) or frames stalled (e.g. after suspend): otherwise they stay "on the way" while nothing moves.
     fn finish_runs(&mut self) {
-        crate::log::debug("finish runs");
+        self.figures.finish_runs();
     }
 
-    /// The calm scene runs at the chosen frame rate (power-save caps it at 12). JULE_FPS overrides it.
-    /// Phase 3 boosts to 30 fps while Santa or the plow move, as on Windows.
+    /// The calm scene runs at the chosen frame rate (power-save caps it at 12); only fast things get more frames.
+    /// As on Windows, Santa and the plow are boosted to 30 fps (20 in power-save mode), not 60. JULE_FPS
+    /// overrides it.
     fn desired_fps(&self) -> f64 {
         if let Some(f) = std::env::var("JULE_FPS").ok().and_then(|v| v.trim().parse::<f64>().ok()) {
             if f > 0.0 {
@@ -288,10 +343,12 @@ impl Controller {
             }
         }
         let fr = self.cfg.frame_rate as f64;
-        if self.power_save {
-            fr.min(12.0)
+        let calm = if self.power_save { fr.min(12.0) } else { fr };
+        let busy = self.figures.busy() || self.screens.iter().any(|s| s.layer.is_busy());
+        if busy {
+            calm.max(if self.power_save { 20.0 } else { 30.0 })
         } else {
-            fr
+            calm
         }
     }
 
@@ -332,8 +389,10 @@ impl Controller {
             }
             let dt = gap.min(0.1);
             last = now;
-            self.time += dt;
+            self.time += dt as f64;
             self.timers(dt);
+            let screens = self.screen_infos();
+            self.figures.update(dt, self.time, &screens, self.cfg.santa, self.cfg.plow);
 
             let amount = self.snow_amount();
             let level = if amount > 1.5 {
@@ -354,14 +413,23 @@ impl Controller {
                 snow_ground: self.cfg.snow_ground,
                 fullscreen: self.fullscreen,
                 pause_fullscreen: self.cfg.pause_fullscreen,
+                power_save: self.power_save,
+                lights: self.cfg.lights,
+                elves: self.cfg.elves,
+                elf_count: self.cfg.elf_count,
+                snowman_stage: if self.cfg.snowman { self.snowman_stage } else { 0 },
+                santa: self.figures.santa.as_ref(),
+                sparks: &self.figures.sparks,
+                plow: Some(&self.figures.plow),
             };
             let busy = Instant::now();
-            self.frame_all(dt, &st);
+            frame_all(&mut self.display, &mut self.screens, dt, &st);
+            self.after_frame();
             self.display.flush()?;
             stats.frame(busy.elapsed(), self.desired_fps(), self.screens.iter().map(|s| s.layer.flake_count()).sum());
 
             if let Some((dir, at)) = &self.snapshot {
-                if self.time >= *at {
+                if self.time >= *at as f64 {
                     let dir = dir.clone();
                     self.snapshot = None;
                     self.write_snapshots(&dir);
@@ -410,6 +478,11 @@ impl Controller {
             self.power_timer = 5.0;
             self.update_power_save();
         }
+        self.day_timer -= dt;
+        if self.day_timer <= 0.0 {
+            self.day_timer = 30.0;
+            self.update_snowman_stage();
+        }
         self.desktop_timer -= dt;
         if self.desktop_timer <= 0.0 {
             self.desktop_timer = 1.0;
@@ -426,46 +499,17 @@ impl Controller {
         }
     }
 
-    fn frame_all(&mut self, dt: f32, st: &SceneState) {
-        // The X server reads shared memory when it gets to the request: let it finish last frame's first.
-        if let Err(e) = self.display.sync() {
-            crate::log::error(&format!("sync: {e}"));
-        }
-        // Per screen, so a failing screen (e.g. mid display change) does not stop the others.
-        for s in &mut self.screens {
-            let layer = &mut s.layer;
-            let present = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| layer.frame(dt, st))) {
-                Ok(p) => p,
-                Err(_) => {
-                    crate::log::error("a screen's frame panicked");
-                    continue;
+    /// What the screens hand back after a frame: snow the plow scraped up, and elves walking over to a
+    /// neighbouring screen.
+    fn after_frame(&mut self) {
+        for i in 0..self.screens.len() {
+            self.figures.plow.pushed += self.screens[i].layer.take_pushed();
+            let from_scale = self.screens[i].layer.scale();
+            for elf in self.screens[i].layer.take_outgoing_elves() {
+                let rects: Vec<Rect> = self.screens.iter().map(|s| s.layer.rect).collect();
+                if let Some(j) = crate::figures::neighbor(&rects, i, elf.dir()) {
+                    self.screens[j].layer.receive_elf(elf, from_scale);
                 }
-            };
-            let Some(w) = &s.window else { continue };
-            // a fullscreen app pauses this screen: hide the window, and show it again afterwards
-            if s.layer.paused() == s.mapped {
-                s.mapped = !s.layer.paused();
-                self.display.set_mapped(w, s.mapped);
-                crate::log::debug(&format!(
-                    "screen at {},{} {}",
-                    s.layer.rect.x,
-                    s.layer.rect.y,
-                    if s.mapped { "resumed" } else { "paused for a fullscreen app" }
-                ));
-            }
-            let width = s.layer.width();
-            let result = match present {
-                Present::Nothing => Ok(()),
-                Present::Full => {
-                    let full = [Rect::new(0, 0, s.layer.rect.w, s.layer.rect.h)];
-                    self.display.put(w, s.layer.pixels(), width as usize, s.layer.height(), &full)
-                }
-                Present::Rects => {
-                    self.display.put(w, s.layer.pixels(), width as usize, s.layer.height(), s.layer.present_rects())
-                }
-            };
-            if let Err(e) = result {
-                crate::log::error(&format!("present: {e}"));
             }
         }
     }
@@ -493,6 +537,51 @@ impl Controller {
         }
         if let Some(t) = self.tray.take() {
             let _ = t.shutdown();
+        }
+    }
+}
+
+/// Draws one frame on every screen and sends what changed. Per screen, so a failing screen (e.g. mid display
+/// change) does not stop the others.
+fn frame_all(display: &mut Display, screens: &mut [Screen], dt: f32, st: &SceneState) {
+    // The X server reads shared memory when it gets to the request: let it finish last frame's first.
+    if let Err(e) = display.sync() {
+        crate::log::error(&format!("sync: {e}"));
+    }
+    for s in screens.iter_mut() {
+        let layer = &mut s.layer;
+        let present = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| layer.frame(dt, st))) {
+            Ok(p) => p,
+            Err(_) => {
+                crate::log::error("a screen's frame panicked");
+                continue;
+            }
+        };
+        let Some(w) = &s.window else { continue };
+        // a fullscreen app pauses this screen: hide the window, and show it again afterwards
+        if s.layer.paused() == s.mapped {
+            s.mapped = !s.layer.paused();
+            display.set_mapped(w, s.mapped);
+            crate::log::debug(&format!(
+                "screen at {},{} {}",
+                s.layer.rect.x,
+                s.layer.rect.y,
+                if s.mapped { "resumed" } else { "paused for a fullscreen app" }
+            ));
+        }
+        let width = s.layer.width();
+        let result = match present {
+            Present::Nothing => Ok(()),
+            Present::Full => {
+                let full = [Rect::new(0, 0, s.layer.rect.w, s.layer.rect.h)];
+                display.put(w, s.layer.pixels(), width as usize, s.layer.height(), &full)
+            }
+            Present::Rects => {
+                display.put(w, s.layer.pixels(), width as usize, s.layer.height(), s.layer.present_rects())
+            }
+        };
+        if let Err(e) = result {
+            crate::log::error(&format!("present: {e}"));
         }
     }
 }

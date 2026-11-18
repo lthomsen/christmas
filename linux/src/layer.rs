@@ -1,9 +1,11 @@
 //! One screen's scene: a premultiplied ARGB32 pixel buffer the size of the monitor, and what is drawn on it.
 //! Ported from `src/Layer.cs` (and `macos/Sources/JuleHygge/Overlay.swift`); origin top left, as in both.
 //!
-//! Phase 2: falling snow (dots and crystals) and the snow pile on the ground (at the top of a bottom panel, or the
-//! screen bottom), with storm drifts and the fullscreen pause. Lights, elves, snowman, plow and Santa follow in
-//! later phases (see docs/linux-plan.md).
+//! Falling snow (dots and crystals), the snow pile on the ground (at the top of a bottom panel, or the screen
+//! bottom) with storm drifts, and the fullscreen pause live here. The figures are in submodules, which as child
+//! modules share this file's private fields (like the one big `Layer` class on Windows): the Christmas lights
+//! (`lights`), Santa and the sparks (`santa`), the snowman (`snowman`), the snow plow (`plow`) and the elves
+//! (`elves`); `draw` has the Cairo helpers they use. Snow on windows follows in phase 5.
 //!
 //! The Windows optimisations are kept, because the overlay covers whole 4K screens:
 //! - only what was drawn in the previous frame is cleared (`mark()` and `clear_rects()`), and only that plus
@@ -17,14 +19,27 @@ use std::f32::consts::{FRAC_PI_3, TAU};
 
 use cairo::{Context, Format, ImageSurface};
 
+mod draw;
+mod elves;
+mod ground;
+mod lights;
+mod plow;
+mod santa;
+mod snowman;
+
+pub use elves::Elf;
+pub use snowman::MAX_STAGE as SNOWMAN_MAX_STAGE;
+
+use crate::figures::{PlowRun, Santa, Spark};
 use crate::rng::Rng;
 use crate::x11::{Rect, Res};
 
 /// What the controller shares with every screen for one frame.
-#[derive(Clone, Copy, Debug)]
-pub struct SceneState {
-    /// Seconds since start.
-    pub time: f32,
+#[derive(Clone, Copy)]
+pub struct SceneState<'a> {
+    /// Seconds since start. A double, because a float loses precision after a few days of uptime and animations
+    /// would start to stutter (as on Windows).
+    pub time: f64,
     /// Horizontal wind in points per second (positive to the right).
     pub wind: f32,
     /// 0 light ... 2 storm, gliding while the weather changes.
@@ -40,6 +55,17 @@ pub struct SceneState {
     /// `PauseFullscreen`) or moves its ground to the screen bottom, because the app hides the panel.
     pub fullscreen: Option<Rect>,
     pub pause_fullscreen: bool,
+    /// Power-save mode: the lights twinkle with fewer updates.
+    pub power_save: bool,
+    pub lights: bool,
+    pub elves: bool,
+    /// Chosen number of elves per screen (setting `NisseCount`).
+    pub elf_count: i32,
+    /// The snowman's stage today (1..=12), or 0 when it is switched off. Only the primary screen has one.
+    pub snowman_stage: i32,
+    pub santa: Option<&'a Santa>,
+    pub sparks: &'a [Spark],
+    pub plow: Option<&'a PlowRun>,
 }
 
 /// Width in pixels of one column of the snow pile, as on Windows.
@@ -103,9 +129,13 @@ pub enum Present {
 pub struct Layer {
     /// The monitor in global coordinates.
     pub rect: Rect,
-    /// Only the primary screen gets the snowman (phase 3).
-    #[allow(dead_code)]
+    /// Only the primary screen gets the snowman.
     pub primary: bool,
+    /// This screen's place in the controller's list (the plow run names its screens by it).
+    pub index: usize,
+    /// There is a screen directly to the left / right (elves walk over to it).
+    pub neighbor_left: bool,
+    pub neighbor_right: bool,
     w: i32,
     h: i32,
     /// Scale of all figures: screen height / 1080 (at least 0.6), as on Windows.
@@ -124,8 +154,28 @@ pub struct Layer {
     flakes: Vec<Flake>,
     dirty: Vec<Rect>,
     prev_dirty: Vec<Rect>,
+    /// Changed this frame but not to be cleared next frame (the lights strip after it was re-rendered).
+    present_only: Vec<Rect>,
     present: Vec<Rect>,
     full_present: bool,
+
+    ground: Option<ground::GroundImage>,
+    /// The cached ground is in the buffer, so clearing restores it.
+    ground_shown: bool,
+    lights: Option<lights::LightsImage>,
+    /// The lights strip is in the buffer, so clearing restores it instead of leaving it empty.
+    lights_shown: bool,
+    /// Where the snowman stands, in global coordinates (for the celebration sparks in phase 4).
+    snowman_pos: Option<(f32, f32)>,
+    plow_bits: Vec<plow::PlowBit>,
+    plow_smoke_timer: f32,
+    plow_chunk_acc: f32,
+    plow_pushed: f32,
+    elves: Vec<Elf>,
+    outgoing: Vec<Elf>,
+    next_elf_id: u64,
+    elf_offset: i32,
+    elf_change_timer: f32,
 }
 
 impl Layer {
@@ -152,6 +202,9 @@ impl Layer {
         Ok(Layer {
             rect,
             primary,
+            index: 0,
+            neighbor_left: false,
+            neighbor_right: false,
             w,
             h,
             s,
@@ -166,8 +219,24 @@ impl Layer {
             flakes: Vec::new(),
             dirty: Vec::new(),
             prev_dirty: Vec::new(),
+            present_only: Vec::new(),
             present: Vec::new(),
             full_present: true,
+            ground: None,
+            ground_shown: false,
+            lights: None,
+            lights_shown: false,
+            snowman_pos: None,
+            plow_bits: Vec::new(),
+            plow_smoke_timer: 0.0,
+            plow_chunk_acc: 0.0,
+            plow_pushed: 0.0,
+            elves: Vec::new(),
+            outgoing: Vec::new(),
+            // seeds differ per screen, so elf ids from different screens do not collide
+            next_elf_id: seed << 20,
+            elf_offset: 0,
+            elf_change_timer: 90.0,
         })
     }
 
@@ -192,6 +261,18 @@ impl Layer {
     }
     pub fn paused(&self) -> bool {
         self.paused
+    }
+    /// The figure scale: screen height / 1080.
+    pub fn scale(&self) -> f32 {
+        self.s
+    }
+    /// Average height of the pile (the snow plow comes when it gets high).
+    pub fn heap_average(&self) -> f32 {
+        self.heap.iter().sum::<f32>() / self.heap.len() as f32
+    }
+    #[allow(dead_code)]
+    pub fn snowman_pos(&self) -> Option<(f32, f32)> {
+        self.snowman_pos
     }
     /// The top of a bottom panel in local y (None: no panel, the snow lies on the screen bottom).
     pub fn set_panel_top(&mut self, y: Option<i32>) {
@@ -225,6 +306,9 @@ impl Layer {
                 self.canvas.pixels.fill(0);
                 self.canvas.surface.mark_dirty();
                 self.prev_dirty.clear();
+                // the strip and the ground are copied in again when the screen resumes
+                self.lights_shown = false;
+                self.ground_shown = false;
                 self.paused = true;
             }
             return Present::Nothing;
@@ -235,6 +319,8 @@ impl Layer {
         }
 
         self.update_snow(dt, st);
+        self.update_plow(dt, st);
+        self.update_elves(dt, st);
 
         // Clear what was drawn last frame (Cairo must finish before the buffer is touched directly).
         self.canvas.surface.flush();
@@ -242,7 +328,13 @@ impl Layer {
         self.clear_rects(&cleared);
         self.canvas.surface.mark_dirty();
 
-        self.draw_ground();
+        // back to front, as on Windows
+        self.present_only.clear();
+        self.draw_lights(dt, st);
+        self.draw_ground(dt, st);
+        self.draw_santa_and_sparks(st);
+        self.draw_elves();
+        self.draw_plow(st);
         self.draw_snow();
         self.canvas.surface.flush();
 
@@ -264,7 +356,7 @@ impl Layer {
         }
         self.present.clear();
         let mut area = 0i64;
-        for r in cleared.iter().chain(self.dirty.iter()) {
+        for r in cleared.iter().chain(&self.dirty).chain(&self.present_only) {
             let c = r.clip(self.w, self.h);
             if c.is_empty() {
                 continue;
@@ -283,6 +375,8 @@ impl Layer {
         Present::Rects
     }
 
+    /// Empties the rectangles again, except where the lights strip or the ground are shown: there their cached
+    /// images are restored.
     fn clear_rects(&mut self, rects: &[Rect]) {
         let w = self.w as usize;
         for r in rects {
@@ -290,9 +384,12 @@ impl Layer {
             if c.is_empty() {
                 continue;
             }
+            let (x0, x1) = (c.x as usize, c.right() as usize);
             for y in c.y..c.bottom() {
-                let start = y as usize * w + c.x as usize;
-                self.canvas.pixels[start..start + c.w as usize].fill(0);
+                if !self.restore_lights(y, x0, x1) && !self.restore_ground(y, x0, x1) {
+                    let start = y as usize * w;
+                    self.canvas.pixels[start + x0..start + x1].fill(0);
+                }
             }
         }
     }
@@ -329,7 +426,8 @@ impl Layer {
             i -= 1;
             let f = &mut self.flakes[i];
             f.y += f.vy * dt;
-            f.x += (wind * (0.4 + f.r / (4.0 * s)) + (st.time * f.sway_spd + f.phase).cos() * f.sway) * dt;
+            let sway = (st.time * f.sway_spd as f64 + f.phase as f64).cos() as f32;
+            f.x += (wind * (0.4 + f.r / (4.0 * s)) + sway * f.sway) * dt;
             f.rot += f.rot_spd * dt;
             if f.x < -60.0 {
                 f.x += w + 120.0;
@@ -415,8 +513,8 @@ impl Layer {
             // dunes: long waves in global x (so they line up across screens), slowly wandering with the wind
             let gx = x as f64 + self.rect.x as f64;
             let dir = if st.wind > 0.0 { 1.0 } else { -1.0 };
-            let dune = 0.5
-                + 0.5 * (gx / (240.0 * self.s as f64) * 2.0 * std::f64::consts::PI - st.time as f64 * 0.03 * dir).sin();
+            let dune =
+                0.5 + 0.5 * (gx / (240.0 * self.s as f64) * 2.0 * std::f64::consts::PI - st.time * 0.03 * dir).sin();
             amount *= 0.3 + 1.4 * dune as f32;
         }
         let idx = (x / HEAP_STEP as f32) as isize;
@@ -486,36 +584,9 @@ impl Layer {
         }
     }
 
-    fn draw_ground(&mut self) {
-        let max = self.heap.iter().cloned().fold(0.0f32, f32::max);
-        if max < 0.5 {
-            return;
-        }
-        let (g, s) = (self.ground_y, self.s);
-        self.mark(0.0, g - max - 4.0 * s, self.w as f32, max + 8.0 * s);
-        let cr = &self.canvas.cr;
-        let top = |cr: &Context| {
-            for (i, h) in self.heap.iter().enumerate() {
-                cr.line_to((i * HEAP_STEP) as f64, (g - h) as f64);
-            }
-        };
-        cr.new_path();
-        top(cr);
-        cr.line_to(self.w as f64, g as f64 + 1.0);
-        cr.line_to(0.0, g as f64 + 1.0);
-        cr.close_path();
-        cr.set_source_rgba(248.0 / 255.0, 252.0 / 255.0, 1.0, 245.0 / 255.0);
-        let _ = cr.fill();
-        cr.new_path();
-        top(cr);
-        cr.set_source_rgba(170.0 / 255.0, 200.0 / 255.0, 230.0 / 255.0, 110.0 / 255.0);
-        cr.set_line_width((1.5 * s) as f64);
-        cr.set_line_join(cairo::LineJoin::Round);
-        let _ = cr.stroke();
-    }
-
     fn draw_snow(&mut self) {
-        // Dots go straight into the buffer; Cairo has been flushed by the caller.
+        // Dots go straight into the buffer, so Cairo must finish the figures first.
+        self.canvas.surface.flush();
         for i in 0..self.flakes.len() {
             let (x, y, r, a, crystal) = {
                 let f = &self.flakes[i];
@@ -551,12 +622,6 @@ impl Layer {
             }
             let _ = cr.stroke();
         }
-    }
-
-    /// Average height of the pile (the snow plow comes when it gets high, phase 3).
-    #[cfg(test)]
-    fn heap_average(&self) -> f32 {
-        self.heap.iter().sum::<f32>() / self.heap.len() as f32
     }
 
     // ------------------------------------------------------------------ test aid
@@ -618,7 +683,7 @@ fn heap_at(heap: &[f32], x: f32) -> f32 {
 mod tests {
     use super::*;
 
-    fn state() -> SceneState {
+    fn state() -> SceneState<'static> {
         SceneState {
             time: 5.0,
             wind: 20.0,
@@ -629,6 +694,15 @@ mod tests {
             snow_ground: true,
             fullscreen: None,
             pause_fullscreen: true,
+            power_save: false,
+            // the figures are off here; tests that need them switch them on
+            lights: false,
+            elves: false,
+            elf_count: 3,
+            snowman_stage: 0,
+            santa: None,
+            sparks: &[],
+            plow: None,
         }
     }
 
@@ -641,10 +715,12 @@ mod tests {
         for _ in 0..200 {
             l.frame(0.05, &st);
         }
-        // Every lit pixel must lie inside something drawn in the last frame: nothing is left behind.
+        // Every lit pixel must lie inside something drawn in the last frame, or be what clearing restores there
+        // (the cached ground): nothing is left behind.
+        let background = l.background();
         let w = l.width();
-        for (i, p) in l.pixels().iter().enumerate() {
-            if *p == 0 {
+        for (i, (p, b)) in l.pixels().iter().zip(&background).enumerate() {
+            if *p == 0 || p == b {
                 continue;
             }
             let (x, y) = ((i as i32) % w, (i as i32) / w);
@@ -739,6 +815,84 @@ mod tests {
         assert_eq!(l.ground_y, 200.0);
         l.frame(0.05, &st);
         assert_eq!(l.ground_y, 180.0);
+    }
+
+    #[test]
+    fn figures_leave_no_trails() {
+        use crate::figures::{Figures, ScreenInfo};
+        // one 1280x720 screen with every figure: lights, elves, the finished snowman, Santa and the plow
+        let rect = Rect::new(0, 0, 1280, 720);
+        let mut l = Layer::new(rect, true, 1.0, 11).unwrap();
+        l.heap.fill(18.0 * l.s);
+        let mut f = Figures::new(4);
+        let info = |l: &Layer| vec![ScreenInfo { rect, s: l.s, primary: true, heap_average: l.heap_average() }];
+        f.launch_santa(&info(&l));
+        f.send_plow(&info(&l));
+        let mut t = 0.0;
+        let mut drew_elves = false;
+        for _ in 0..1200 {
+            t += 0.05;
+            f.update(0.05, t, &info(&l), true, true);
+            let st = SceneState {
+                time: t,
+                lights: true,
+                elves: true,
+                snowman_stage: 12,
+                santa: f.santa.as_ref(),
+                sparks: &f.sparks,
+                plow: Some(&f.plow),
+                ..state()
+            };
+            l.frame(0.05, &st);
+            f.plow.pushed += l.take_pushed();
+            drew_elves |= !l.elves.is_empty();
+        }
+        assert!(drew_elves);
+        assert!(f.plow.pushed > 0.0, "the plow scraped nothing");
+        // Everything off: once the last flakes have landed (up to ~40 s on this screen) and the pile has melted,
+        // the screen must be completely empty again.
+        let off = SceneState { time: t, snow_on: false, snow_ground: false, ..state() };
+        f.finish_runs();
+        for _ in 0..1200 {
+            l.frame(0.05, &off);
+        }
+        assert_eq!(l.flake_count(), 0);
+        let w = l.width();
+        if let Some(i) = l.pixels().iter().position(|p| *p != 0) {
+            panic!("trail at {},{}", i as i32 % w, i as i32 / w);
+        }
+    }
+
+    impl Layer {
+        /// What clearing the whole screen would leave: the cached lights and ground, empty elsewhere.
+        fn background(&mut self) -> Vec<u32> {
+            let keep = self.canvas.pixels.to_vec();
+            self.clear_rects(&[Rect::new(0, 0, self.w, self.h)]);
+            let bg = self.canvas.pixels.to_vec();
+            self.canvas.pixels.copy_from_slice(&keep);
+            bg
+        }
+    }
+
+    #[test]
+    fn lights_survive_falling_snow() {
+        // flakes falling through the strip must not erase the lights
+        let mut l = Layer::new(Rect::new(0, 0, 1280, 720), true, 1.0, 12).unwrap();
+        let st = SceneState { lights: true, snow_amount: 2.0, ..state() };
+        for _ in 0..3 {
+            l.frame(0.05, &st);
+        }
+        let lh = l.lights.as_ref().unwrap().h;
+        let w = l.width();
+        for _ in 0..20 {
+            l.frame(0.03, &st);
+            let restored = l.background();
+            for (i, (p, q)) in l.pixels()[..(lh * w) as usize].iter().zip(&restored).enumerate() {
+                let (x, y) = (i as i32 % w, i as i32 / w);
+                let drawn = l.prev_dirty.iter().any(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom());
+                assert!(drawn || p == q, "lights erased at {x},{y}");
+            }
+        }
     }
 
     #[test]
