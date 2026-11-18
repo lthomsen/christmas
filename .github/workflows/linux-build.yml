@@ -1,0 +1,83 @@
+# Builds and tests the Linux version (linux/) on every push to main or linux-port and on every pull request
+# that touches it, and keeps the binary and a snapshot of the snow as a workflow artifact.
+#
+# Built on Ubuntu 22.04 so the binary runs on Ubuntu 22.04+ and Linux Mint 21+ (glibc). The smoke test runs the
+# app under Xvfb with --snapshot (Xvfb has no compositor, so no windows are shown, but the scene is drawn).
+# Attaching to releases comes with the updater and installer (phase 6 in docs/linux-plan.md).
+name: Linux build
+
+on:
+  push:
+    branches: [main, linux-port]
+    paths: ['linux/**', '.github/workflows/linux-build.yml']
+  pull_request:
+    paths: ['linux/**', '.github/workflows/linux-build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcairo2-dev xvfb xauth
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal -c clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            linux/target
+          key: linux-${{ hashFiles('linux/Cargo.toml', 'linux/Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --check || echo "::warning::cargo fmt would change files"
+
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Tests
+        run: cargo test
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Smoke test under Xvfb
+        run: |
+          export JULE_DEBUG=1 JULE_SETTINGS="$RUNNER_TEMP/test.ini" XDG_RUNTIME_DIR="$RUNNER_TEMP/run"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          set +e
+          xvfb-run -a -s "-screen 0 1920x1080x24" timeout 10 build/JuleHygge --snapshot="$RUNNER_TEMP/shots,4"
+          code=$?
+          set -e
+          echo "exit code $code (124 = stopped by timeout, as expected)"
+          cat "$XDG_RUNTIME_DIR/julehygge-debug.log" || true
+          [ "$code" = 124 ] || exit 1
+          ls -l "$RUNNER_TEMP/shots"
+          test -s "$RUNNER_TEMP/shots/screen0.png"
+          cp "$RUNNER_TEMP/shots/screen0.png" build/
+
+      - name: Keep as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JuleHygge-linux
+          path: |
+            linux/build/JuleHygge
+            linux/build/screen0.png
+            linux/Cargo.lock

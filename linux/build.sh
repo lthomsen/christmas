@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Builds JuleHygge for Linux into linux/build/JuleHygge.
+#
+#   ./build.sh                 # development build, version 0.0.0 (never updates itself)
+#   VERSION=1.6.0 ./build.sh   # release build stamped with that version (the release workflow does this)
+#
+# Needs Rust (rustup, stable >= 1.89) and: sudo apt install build-essential pkg-config libcairo2-dev
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if ! command -v cargo >/dev/null; then
+    echo "cargo not found: install Rust with https://rustup.rs" >&2
+    exit 1
+fi
+if ! pkg-config --exists cairo; then
+    echo "cairo not found: sudo apt install pkg-config libcairo2-dev" >&2
+    exit 1
+fi
+
+cargo build --release --locked 2>/dev/null || cargo build --release
+mkdir -p build
+cp target/release/JuleHygge build/JuleHygge
+echo "Built: $(pwd)/build/JuleHygge ($(build/JuleHygge --version))"
