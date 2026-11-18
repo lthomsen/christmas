@@ -25,7 +25,7 @@ jobs:
       run:
         working-directory: linux
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: System packages
         run: |
@@ -38,7 +38,7 @@ jobs:
           rustup default stable
           rustc --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -74,7 +74,7 @@ jobs:
           cp "$RUNNER_TEMP/shots/screen0.png" build/
 
       - name: Keep as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: JuleHygge-linux
           path: |

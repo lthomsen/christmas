@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Version
         id: ver
@@ -48,7 +48,7 @@ jobs:
           Get-FileHash JuleHygge.exe -Algorithm SHA256 | Format-List Algorithm, Hash
 
       - name: Keep as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: JuleHygge-windows
           path: JuleHygge.exe
