@@ -12,6 +12,8 @@
 //!
 //! Everything drawn MUST be registered with `mark()`, or it stays on screen as a trail.
 
+use std::f32::consts::{FRAC_PI_3, TAU};
+
 use cairo::{Context, Format, ImageSurface};
 
 use crate::rng::Rng;
@@ -63,8 +65,9 @@ impl Canvas {
         let mut pixels = vec![0u32; w as usize * h as usize];
         // SAFETY: the buffer is w*h*4 bytes with a stride of w*4 (valid for ARGB32), it is never reallocated
         // (its length never changes), and it outlives the surface and context (field order above).
-        let surface =
-            unsafe { ImageSurface::create_for_data_unsafe(pixels.as_mut_ptr() as *mut u8, Format::ARgb32, w, h, w * 4)? };
+        let surface = unsafe {
+            ImageSurface::create_for_data_unsafe(pixels.as_mut_ptr() as *mut u8, Format::ARgb32, w, h, w * 4)?
+        };
         let cr = Context::new(&surface)?;
         Ok(Canvas { cr, surface, pixels })
     }
@@ -82,6 +85,8 @@ pub enum Present {
 pub struct Layer {
     /// The monitor in global coordinates.
     pub rect: Rect,
+    /// Only the primary screen gets the snowman (phase 3).
+    #[allow(dead_code)]
     pub primary: bool,
     w: i32,
     h: i32,
@@ -138,7 +143,12 @@ impl Layer {
     }
 
     fn mark(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        self.dirty.push(Rect::new(x.floor() as i32 - 2, y.floor() as i32 - 2, w.ceil() as i32 + 5, h.ceil() as i32 + 5));
+        self.dirty.push(Rect::new(
+            x.floor() as i32 - 2,
+            y.floor() as i32 - 2,
+            w.ceil() as i32 + 5,
+            h.ceil() as i32 + 5,
+        ));
     }
 
     // ------------------------------------------------------------------ one frame
@@ -261,7 +271,7 @@ impl Layer {
         let vy = (25.0 + depth * 55.0 + self.rng.f() * 15.0) * s * if st.snow_level == 2 { 1.5 } else { 1.0 };
         let x = self.rng.range(-50, self.w + 50) as f32;
         let y = if anywhere { self.rng.f() * self.ground_y } else { -10.0 - self.rng.f() * 60.0 };
-        let phase = self.rng.f() * 6.28;
+        let phase = self.rng.f() * TAU;
         let sway = (8.0 + self.rng.f() * 20.0) * s;
         let sway_spd = 0.5 + self.rng.f() * 1.2;
         let a = (110.0 + depth * 145.0) as i32;
@@ -269,7 +279,7 @@ impl Layer {
         if crystal {
             r *= 1.6;
         }
-        let rot = self.rng.f() * 6.28;
+        let rot = self.rng.f() * TAU;
         let rot_spd = (self.rng.f() - 0.5) * 2.0;
         let catches = self.rng.f() < 0.5;
         Flake { x, y, r, vy, phase, sway, sway_spd, rot, rot_spd, a, crystal, catches }
@@ -343,7 +353,7 @@ impl Layer {
             let step = ((f.a - 60) / 13).clamp(0, 15);
             cr.set_source_rgba(1.0, 1.0, 1.0, (60 + step * 13) as f64 / 255.0);
             for k in 0..3 {
-                let a = f.rot + k as f32 * 1.0472;
+                let a = f.rot + k as f32 * FRAC_PI_3;
                 let (dx, dy) = (a.cos() * f.r, a.sin() * f.r);
                 cr.move_to((f.x - dx) as f64, (f.y - dy) as f64);
                 cr.line_to((f.x + dx) as f64, (f.y + dy) as f64);

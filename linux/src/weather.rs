@@ -23,7 +23,13 @@ pub fn spells(year: i32, month: u32, day: u32) -> Vec<Spell> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     let mut result = Vec::new();
     let first = next(&mut state);
-    let mut level = if first < 0.45 { 0 } else if first < 0.9 { 1 } else { 2 };
+    let mut level = if first < 0.45 {
+        0
+    } else if first < 0.9 {
+        1
+    } else {
+        2
+    };
     let mut t = 0.0;
     while t < 86400.0 {
         result.push(Spell { start: t, level });
@@ -37,9 +43,27 @@ pub fn spells(year: i32, month: u32, day: u32) -> Vec<Spell> {
         t += minutes * 60.0;
         let lot = next(&mut state);
         level = match level {
-            0 => if lot < 0.8 { 1 } else { 2 },
-            1 => if lot < 0.65 { 0 } else { 2 },
-            _ => if lot < 0.65 { 1 } else { 0 },
+            0 => {
+                if lot < 0.8 {
+                    1
+                } else {
+                    2
+                }
+            }
+            1 => {
+                if lot < 0.65 {
+                    0
+                } else {
+                    2
+                }
+            }
+            _ => {
+                if lot < 0.65 {
+                    1
+                } else {
+                    0
+                }
+            }
         };
     }
     result
@@ -85,10 +109,11 @@ pub struct Weather {
 
 impl Weather {
     pub fn new() -> Self {
-        let start_at = std::env::var("JULE_WEATHER_TIME").or_else(|_| std::env::var("JULE_VEJR_TID")).ok().and_then(|v| {
-            let (h, m) = v.trim().split_once(':')?;
-            Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0)
-        });
+        let start_at =
+            std::env::var("JULE_WEATHER_TIME").or_else(|_| std::env::var("JULE_VEJR_TID")).ok().and_then(|v| {
+                let (h, m) = v.trim().split_once(':')?;
+                Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0)
+            });
         Weather { cached: None, start_at, started: Instant::now() }
     }
 
@@ -118,12 +143,48 @@ mod tests {
 
     // Reference values computed with the C# code in src/Weather.cs (compiled with PowerShell's Add-Type,
     // 2026-11-18). If these fail, Linux no longer has the same weather as Windows and macOS.
+    /// Date, number of spells, last spell's level, and the first five spells as (start second, level).
+    type SpellCase = ((i32, u32, u32), usize, i32, [(f64, i32); 5]);
+
     #[test]
     fn same_spells_as_windows() {
-        let cases: [((i32, u32, u32), usize, i32, [(f64, i32); 5]); 3] = [
-            ((2026, 12, 1), 57, 1, [(0.0, 0), (2210.0514892966294, 1), (6148.897901310743, 0), (8711.331296905653, 2), (8968.094945557224, 1)]),
-            ((2026, 12, 24), 59, 1, [(0.0, 1), (1618.3119444214935, 2), (2415.822770431437, 1), (5301.612049411933, 0), (6578.622026669398, 1)]),
-            ((2027, 1, 15), 50, 0, [(0.0, 0), (5165.189250501225, 1), (5594.962174117972, 2), (6244.797250743951, 1), (7362.293277886662, 0)]),
+        let cases: [SpellCase; 3] = [
+            (
+                (2026, 12, 1),
+                57,
+                1,
+                [
+                    (0.0, 0),
+                    (2210.0514892966294, 1),
+                    (6148.897901310743, 0),
+                    (8711.331296905653, 2),
+                    (8968.094945557224, 1),
+                ],
+            ),
+            (
+                (2026, 12, 24),
+                59,
+                1,
+                [
+                    (0.0, 1),
+                    (1618.3119444214935, 2),
+                    (2415.822770431437, 1),
+                    (5301.612049411933, 0),
+                    (6578.622026669398, 1),
+                ],
+            ),
+            (
+                (2027, 1, 15),
+                50,
+                0,
+                [
+                    (0.0, 0),
+                    (5165.189250501225, 1),
+                    (5594.962174117972, 2),
+                    (6244.797250743951, 1),
+                    (7362.293277886662, 0),
+                ],
+            ),
         ];
         for ((y, m, d), count, last, first) in cases {
             let s = spells(y, m, d);
@@ -139,8 +200,15 @@ mod tests {
     #[test]
     fn same_amounts_as_windows() {
         let s = spells(2026, 12, 24);
-        for (sec, want) in [(0.0, 1.0), (600.0, 1.0), (1650.0, 1.2846060874616902), (2500.0, 1.5484553849308667),
-                            (3600.5, 1.0), (43200.0, 2.0), (86000.0, 1.0)] {
+        for (sec, want) in [
+            (0.0, 1.0),
+            (600.0, 1.0),
+            (1650.0, 1.2846060874616902),
+            (2500.0, 1.5484553849308667),
+            (3600.5, 1.0),
+            (43200.0, 2.0),
+            (86000.0, 1.0),
+        ] {
             let got = amount_at(&s, 1, sec);
             assert!((got - want).abs() < 1e-12, "amount at {sec}: {got} vs {want}");
         }

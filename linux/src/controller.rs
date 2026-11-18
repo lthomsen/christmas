@@ -127,7 +127,13 @@ impl Controller {
             };
             crate::log::debug(&format!(
                 "screen {} {}x{}+{}+{} primary {} window {}",
-                m.name, m.rect.w, m.rect.h, m.rect.x, m.rect.y, m.primary, window.is_some()
+                m.name,
+                m.rect.w,
+                m.rect.h,
+                m.rect.x,
+                m.rect.y,
+                m.primary,
+                window.is_some()
             ));
             self.screens.push(Screen { layer, window });
         }
@@ -153,14 +159,19 @@ impl Controller {
     // ------------------------------------------------------------------ scene state
     /// 0 light ... 2 storm, gliding. Setting 3 (changing weather) lets the weather choose.
     fn snow_amount(&mut self) -> f32 {
-        if self.cfg.snow_level == 3 { self.weather.amount() as f32 } else { self.cfg.snow_level as f32 }
+        if self.cfg.snow_level == 3 {
+            self.weather.amount() as f32
+        } else {
+            self.cfg.snow_level as f32
+        }
     }
 
     /// Snowfall drifts between ~60% and ~140% of the chosen amount (two slow waves of about 3 and 7 minutes).
     fn snow_intensity(&self) -> f32 {
         let t = self.time as f64;
         let tau = 2.0 * std::f64::consts::PI;
-        (1.0 + 0.25 * (t * tau / 190.0 + self.snow_phase_a).sin() + 0.15 * (t * tau / 430.0 + self.snow_phase_b).sin()) as f32
+        (1.0 + 0.25 * (t * tau / 190.0 + self.snow_phase_a).sin() + 0.15 * (t * tau / 430.0 + self.snow_phase_b).sin())
+            as f32
     }
 
     fn update_wind(&mut self, dt: f32, level: i32) {
@@ -168,7 +179,8 @@ impl Controller {
         if self.wind_timer <= 0.0 {
             self.wind_timer = 3.0 + self.rng.f() * 6.0;
             let storm = level == 2;
-            self.wind_target = (self.rng.f() * 2.0 - 1.0) * if storm { 140.0 } else { 30.0 } + if storm { 60.0 } else { 0.0 };
+            self.wind_target =
+                (self.rng.f() * 2.0 - 1.0) * if storm { 140.0 } else { 30.0 } + if storm { 60.0 } else { 0.0 };
         }
         self.wind += (self.wind_target - self.wind) * (dt * 0.5).min(1.0);
     }
@@ -182,7 +194,11 @@ impl Controller {
             }
         }
         let fr = self.cfg.frame_rate as f64;
-        if self.cfg.power_save == 1 { fr.min(12.0) } else { fr }
+        if self.cfg.power_save == 1 {
+            fr.min(12.0)
+        } else {
+            fr
+        }
     }
 
     // ------------------------------------------------------------------ main loop
@@ -194,6 +210,7 @@ impl Controller {
             for e in self.display.poll_events()? {
                 self.handle_event(e);
             }
+            #[allow(clippy::never_loop)] // Quit is the only tray message until the full menu arrives
             while let Ok(msg) = self.tray_rx.try_recv() {
                 match msg {
                     TrayMsg::Quit => {
@@ -210,7 +227,13 @@ impl Controller {
             self.timers(dt);
 
             let amount = self.snow_amount();
-            let level = if amount > 1.5 { 2 } else if amount > 0.5 { 1 } else { 0 };
+            let level = if amount > 1.5 {
+                2
+            } else if amount > 0.5 {
+                1
+            } else {
+                0
+            };
             self.update_wind(dt, level);
             let st = SceneState {
                 time: self.time,
@@ -336,7 +359,11 @@ impl Controller {
 }
 
 fn status_text(can_overlay: bool) -> String {
-    if can_overlay { String::new() } else { crate::text::NEEDS_COMPOSITOR.into() }
+    if can_overlay {
+        String::new()
+    } else {
+        crate::text::NEEDS_COMPOSITOR.into()
+    }
 }
 
 /// With JULE_DEBUG=1: the real frame rate, the time spent per frame, and the process's CPU use, every 5 seconds.

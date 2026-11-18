@@ -58,7 +58,7 @@ pub fn argb_be(size: i32) -> Res<Vec<u8>> {
             let i = y * stride + x * 4;
             let p = u32::from_ne_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
             let a = p >> 24;
-            let un = |c: u32| if a == 0 { 0 } else { ((c * 255 + a / 2) / a).min(255) as u8 };
+            let un = |c: u32| (c * 255 + a / 2).checked_div(a).map_or(0, |v| v.min(255) as u8);
             out.extend_from_slice(&[a as u8, un((p >> 16) & 0xFF), un((p >> 8) & 0xFF), un(p & 0xFF)]);
         }
     }

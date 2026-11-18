@@ -11,10 +11,7 @@ use std::sync::OnceLock;
 
 /// `$XDG_RUNTIME_DIR`, or the temp directory when it is not set.
 pub fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir)
 }
 
 /// `$XDG_STATE_HOME/JuleHygge` (default `~/.local/state/JuleHygge`).

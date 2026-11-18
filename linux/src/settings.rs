@@ -149,7 +149,9 @@ impl Settings {
             last_door_notice: date("LastDoorNotice"),
             opened_doors: d
                 .get("OpenedDoors")
-                .map(|s| s.split(',').filter_map(|p| p.trim().parse::<i32>().ok()).filter(|n| (1..=24).contains(n)).collect())
+                .map(|s| {
+                    s.split(',').filter_map(|p| p.trim().parse::<i32>().ok()).filter(|n| (1..=24).contains(n)).collect()
+                })
                 .unwrap_or_default(),
             load_failed: false,
         }
@@ -222,13 +224,15 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut s = Settings::default();
-        s.snow_level = 2;
-        s.frame_rate = 30;
-        s.sound = true;
-        s.last_version = "1.5.0".into();
-        s.first_run = NaiveDate::from_ymd_opt(2026, 11, 20);
-        s.opened_doors = [1, 2, 24].into_iter().collect();
+        let s = Settings {
+            snow_level: 2,
+            frame_rate: 30,
+            sound: true,
+            last_version: "1.5.0".into(),
+            first_run: NaiveDate::from_ymd_opt(2026, 11, 20),
+            opened_doors: [1, 2, 24].into_iter().collect(),
+            ..Default::default()
+        };
         assert_eq!(Settings::parse(&s.to_ini()), s);
     }
 

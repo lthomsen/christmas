@@ -44,7 +44,11 @@ impl Rect {
         self.w <= 0 || self.h <= 0
     }
     pub fn area(&self) -> i64 {
-        if self.is_empty() { 0 } else { self.w as i64 * self.h as i64 }
+        if self.is_empty() {
+            0
+        } else {
+            self.w as i64 * self.h as i64
+        }
     }
     /// The part of `self` inside a `w` x `h` surface.
     pub fn clip(&self, w: i32, h: i32) -> Rect {
@@ -123,7 +127,8 @@ impl Display {
             Err(_) => false,
         };
         if randr_monitors {
-            let mask = randr::NotifyMask::SCREEN_CHANGE | randr::NotifyMask::CRTC_CHANGE | randr::NotifyMask::OUTPUT_CHANGE;
+            let mask =
+                randr::NotifyMask::SCREEN_CHANGE | randr::NotifyMask::CRTC_CHANGE | randr::NotifyMask::OUTPUT_CHANGE;
             conn.randr_select_input(root, mask)?;
         }
 
@@ -176,7 +181,12 @@ impl Display {
     pub fn monitors(&self) -> Vec<Monitor> {
         let mut out = Vec::new();
         if self.randr_monitors {
-            if let Ok(reply) = self.conn.randr_get_monitors(self.root, true).map_err(|e| e.to_string()).and_then(|c| c.reply().map_err(|e| e.to_string())) {
+            if let Ok(reply) = self
+                .conn
+                .randr_get_monitors(self.root, true)
+                .map_err(|e| e.to_string())
+                .and_then(|c| c.reply().map_err(|e| e.to_string()))
+            {
                 for m in reply.monitors {
                     if m.width == 0 || m.height == 0 {
                         continue;
@@ -197,7 +207,11 @@ impl Display {
             }
         }
         if out.is_empty() {
-            out.push(Monitor { rect: Rect::new(0, 0, self.screen_w, self.screen_h), primary: true, name: "screen".into() });
+            out.push(Monitor {
+                rect: Rect::new(0, 0, self.screen_w, self.screen_h),
+                primary: true,
+                name: "screen".into(),
+            });
         }
         if !out.iter().any(|m| m.primary) {
             out[0].primary = true;
@@ -230,8 +244,20 @@ impl Display {
             &aux,
         )?;
         self.conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"JuleHygge")?;
-        self.conn.change_property8(PropMode::REPLACE, win, self.atoms._NET_WM_NAME, self.atoms.UTF8_STRING, b"JuleHygge")?;
-        self.conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"julehygge\0JuleHygge\0")?;
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            win,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            b"JuleHygge",
+        )?;
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            win,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"julehygge\0JuleHygge\0",
+        )?;
         // Hints for compositors: a notification-like window, and never unredirect (2 = do not bypass compositing).
         self.conn.change_property32(
             PropMode::REPLACE,
@@ -240,7 +266,13 @@ impl Display {
             AtomEnum::ATOM,
             &[self.atoms._NET_WM_WINDOW_TYPE_NOTIFICATION],
         )?;
-        self.conn.change_property32(PropMode::REPLACE, win, self.atoms._NET_WM_BYPASS_COMPOSITOR, AtomEnum::CARDINAL, &[2])?;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            win,
+            self.atoms._NET_WM_BYPASS_COMPOSITOR,
+            AtomEnum::CARDINAL,
+            &[2],
+        )?;
 
         // Empty input region: clicks, scrolling and hovering all reach the windows below.
         let region = self.conn.generate_id()?;
@@ -351,7 +383,11 @@ fn read_dpi_scale(conn: &RustConnection, root: Window) -> f32 {
 fn parse_xft_dpi(resources: &str) -> Option<f32> {
     resources.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
-        if k.trim() == "Xft.dpi" { v.trim().parse::<f32>().ok() } else { None }
+        if k.trim() == "Xft.dpi" {
+            v.trim().parse::<f32>().ok()
+        } else {
+            None
+        }
     })
 }
 
