@@ -1,5 +1,9 @@
 //! The main loop: one overlay per monitor, the shared scene state (time, wind, weather), the frame timer, the
 //! tray, and the test aids. Corresponds to `src/Controller.cs`.
+//!
+//! Everything stops while nobody can see it: the session is locked, the screen saver runs, or the display is
+//! off. Each reason is tracked on its own, so e.g. the screen saver ending in front of the lock screen does not
+//! wake the overlay.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -7,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use x11rb::protocol::Event;
 
-use crate::layer::{Layer, Present, SceneState};
+use crate::layer::{Layer, PixelStore, Present, SceneState};
 use crate::rng::Rng;
+use crate::session::SessionWatch;
 use crate::settings::Settings;
 use crate::tray::{TrayHandle, TrayMsg};
 use crate::weather::Weather;
@@ -23,6 +28,8 @@ struct Screen {
     layer: Layer,
     /// None when no window can be shown (no compositor); the scene still runs for `--snapshot`.
     window: Option<OverlayWindow>,
+    /// False while a fullscreen app pauses this screen.
+    mapped: bool,
 }
 
 pub struct Controller {
@@ -46,6 +53,17 @@ pub struct Controller {
     can_overlay: bool,
     compositor_timer: f32,
     top_timer: f32,
+    /// Fullscreen window and panels, checked once a second.
+    desktop_timer: f32,
+    fullscreen: Option<Rect>,
+    /// Battery state, checked every 5 seconds.
+    power_timer: f32,
+    power_save: bool,
+
+    session: SessionWatch,
+    display_off: bool,
+    next_dpms_check: Instant,
+    asleep: bool,
     /// Monitors changed: rebuild after this many seconds (RandR sends bursts of events).
     rebuild_in: Option<f32>,
 }
@@ -63,6 +81,7 @@ impl Controller {
         let can_overlay = display.can_overlay();
         let (tx, tray_rx) = channel();
         let tray = crate::tray::spawn(tx, status_text(can_overlay));
+        let session = crate::session::spawn();
         let snow_phase_a = rng.f64() * 2.0 * std::f64::consts::PI;
         let snow_phase_b = rng.f64() * 2.0 * std::f64::consts::PI;
         let mut c = Controller {
@@ -84,8 +103,17 @@ impl Controller {
             can_overlay,
             compositor_timer: 2.0,
             top_timer: 2.0,
+            desktop_timer: 0.0,
+            fullscreen: None,
+            power_timer: 0.0,
+            power_save: false,
+            session,
+            display_off: false,
+            next_dpms_check: Instant::now(),
+            asleep: false,
             rebuild_in: None,
         };
+        c.update_power_save();
         c.build_screens();
         Ok(c)
     }
@@ -107,7 +135,14 @@ impl Controller {
                 continue;
             }
             let seed = self.rng.next_u64();
-            let layer = match Layer::new(m.rect, m.primary, self.display.dpi_scale, seed) {
+            // shared memory only for a real window (a --snapshot run without a compositor has none)
+            let shm = if self.can_overlay { self.display.shm_buffer(m.rect.w, m.rect.h) } else { None };
+            let seg = shm.as_ref().map(|(_, seg)| *seg);
+            let pixels: Box<dyn PixelStore> = match shm {
+                Some((buf, _)) => Box::new(buf),
+                None => Box::new(vec![0u32; m.rect.w as usize * m.rect.h as usize]),
+            };
+            let layer = match Layer::with_pixels(m.rect, m.primary, self.display.dpi_scale, seed, pixels) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::log::error(&format!("screen {} {:?}: {e}", m.name, m.rect));
@@ -115,7 +150,7 @@ impl Controller {
                 }
             };
             let window = if self.can_overlay {
-                match self.display.create_overlay(m.rect) {
+                match self.display.create_overlay(m.rect, seg) {
                     Ok(w) => Some(w),
                     Err(e) => {
                         crate::log::error(&format!("overlay for {}: {e}", m.name));
@@ -126,17 +161,19 @@ impl Controller {
                 None
             };
             crate::log::debug(&format!(
-                "screen {} {}x{}+{}+{} primary {} window {}",
+                "screen {} {}x{}+{}+{} primary {} window {} shm {}",
                 m.name,
                 m.rect.w,
                 m.rect.h,
                 m.rect.x,
                 m.rect.y,
                 m.primary,
-                window.is_some()
+                window.is_some(),
+                seg.is_some()
             ));
-            self.screens.push(Screen { layer, window });
+            self.screens.push(Screen { layer, window, mapped: true });
         }
+        self.update_desktop();
     }
 
     fn handle_event(&mut self, e: Event) {
@@ -185,8 +222,65 @@ impl Controller {
         self.wind += (self.wind_target - self.wind) * (dt * 0.5).min(1.0);
     }
 
+    /// Power-save: always (1), or only while a laptop runs on battery (2, the default).
+    fn update_power_save(&mut self) {
+        let on = self.cfg.power_save == 1 || (self.cfg.power_save == 2 && crate::session::on_battery());
+        if on != self.power_save {
+            crate::log::debug(&format!("power-save {}", if on { "on" } else { "off" }));
+            self.power_save = on;
+        }
+    }
+
+    /// Where each screen's snow lies (panels can be moved, hidden or resized) and whether a fullscreen app is
+    /// active. Always detected: screens either pause or move their ground to the screen bottom.
+    fn update_desktop(&mut self) {
+        let fs = self.display.fullscreen_window();
+        if fs != self.fullscreen {
+            crate::log::debug(&format!("fullscreen window: {fs:?}"));
+            self.fullscreen = fs;
+        }
+        let rects: Vec<Rect> = self.screens.iter().map(|s| s.layer.rect).collect();
+        for (s, top) in self.screens.iter_mut().zip(self.display.panel_tops(&rects)) {
+            s.layer.set_panel_top(top);
+        }
+    }
+
+    // ------------------------------------------------------------------ sleep
+    /// True while nobody can see the overlay. DPMS is asked every 2 seconds; lock and screen saver come from the
+    /// session thread.
+    fn check_asleep(&mut self) -> bool {
+        let now = Instant::now();
+        if now >= self.next_dpms_check {
+            self.next_dpms_check = now + Duration::from_secs(2);
+            let off = self.display.display_off();
+            if off != self.display_off {
+                crate::log::debug(&format!("display {}", if off { "off" } else { "on" }));
+                self.display_off = off;
+            }
+        }
+        let (locked, saver) = (self.session.locked(), self.session.screen_saver());
+        let asleep = locked || saver || self.display_off;
+        if asleep != self.asleep {
+            self.asleep = asleep;
+            if asleep {
+                self.finish_runs();
+                crate::log::debug(&format!("asleep (locked={locked} saver={saver} display_off={})", self.display_off));
+            } else {
+                crate::log::debug("awake");
+            }
+        }
+        asleep
+    }
+
+    /// Ends everything that is on its way, as if it had arrived, when the overlay stops (lock, screen saver,
+    /// display off) or frames stalled (e.g. after suspend): otherwise it stays "on the way" while nothing moves.
+    /// Phase 3 ends Santa's trip and the plow run here, phase 4 stops their sound (`FinishRuns()` on Windows).
+    fn finish_runs(&mut self) {
+        crate::log::debug("finish runs");
+    }
+
     /// The calm scene runs at the chosen frame rate (power-save caps it at 12). JULE_FPS overrides it.
-    /// Phase 2 adds "only on battery"; phase 3 boosts to 30 fps while Santa or the plow move, as on Windows.
+    /// Phase 3 boosts to 30 fps while Santa or the plow move, as on Windows.
     fn desired_fps(&self) -> f64 {
         if let Some(f) = std::env::var("JULE_FPS").ok().and_then(|v| v.trim().parse::<f64>().ok()) {
             if f > 0.0 {
@@ -194,7 +288,7 @@ impl Controller {
             }
         }
         let fr = self.cfg.frame_rate as f64;
-        if self.cfg.power_save == 1 {
+        if self.power_save {
             fr.min(12.0)
         } else {
             fr
@@ -220,8 +314,23 @@ impl Controller {
                 }
             }
 
+            if self.check_asleep() {
+                // Keep handling events and the tray, but draw nothing (and do not raise the windows above a
+                // lock screen).
+                std::thread::sleep(Duration::from_millis(250));
+                last = Instant::now();
+                next_frame = last;
+                continue;
+            }
+
             let now = Instant::now();
-            let dt = (now - last).as_secs_f32().min(0.1);
+            let gap = (now - last).as_secs_f32();
+            // frames stopped for a while (e.g. suspend, or a screen saver we got no notice of)
+            if gap > 2.0 {
+                crate::log::debug(&format!("frames stalled for {gap:.1} s"));
+                self.finish_runs();
+            }
+            let dt = gap.min(0.1);
             last = now;
             self.time += dt;
             self.timers(dt);
@@ -242,6 +351,9 @@ impl Controller {
                 snow_level: level,
                 snow_on: self.cfg.snow,
                 snow_intensity: self.snow_intensity(),
+                snow_ground: self.cfg.snow_ground,
+                fullscreen: self.fullscreen,
+                pause_fullscreen: self.cfg.pause_fullscreen,
             };
             let busy = Instant::now();
             self.frame_all(dt, &st);
@@ -293,6 +405,16 @@ impl Controller {
                 }
             }
         }
+        self.power_timer -= dt;
+        if self.power_timer <= 0.0 {
+            self.power_timer = 5.0;
+            self.update_power_save();
+        }
+        self.desktop_timer -= dt;
+        if self.desktop_timer <= 0.0 {
+            self.desktop_timer = 1.0;
+            self.update_desktop();
+        }
         self.top_timer -= dt;
         if self.top_timer <= 0.0 {
             self.top_timer = 2.0;
@@ -305,6 +427,10 @@ impl Controller {
     }
 
     fn frame_all(&mut self, dt: f32, st: &SceneState) {
+        // The X server reads shared memory when it gets to the request: let it finish last frame's first.
+        if let Err(e) = self.display.sync() {
+            crate::log::error(&format!("sync: {e}"));
+        }
         // Per screen, so a failing screen (e.g. mid display change) does not stop the others.
         for s in &mut self.screens {
             let layer = &mut s.layer;
@@ -316,14 +442,27 @@ impl Controller {
                 }
             };
             let Some(w) = &s.window else { continue };
+            // a fullscreen app pauses this screen: hide the window, and show it again afterwards
+            if s.layer.paused() == s.mapped {
+                s.mapped = !s.layer.paused();
+                self.display.set_mapped(w, s.mapped);
+                crate::log::debug(&format!(
+                    "screen at {},{} {}",
+                    s.layer.rect.x,
+                    s.layer.rect.y,
+                    if s.mapped { "resumed" } else { "paused for a fullscreen app" }
+                ));
+            }
             let width = s.layer.width();
             let result = match present {
                 Present::Nothing => Ok(()),
                 Present::Full => {
                     let full = [Rect::new(0, 0, s.layer.rect.w, s.layer.rect.h)];
-                    self.display.put(w, s.layer.pixels(), width as usize, &full)
+                    self.display.put(w, s.layer.pixels(), width as usize, s.layer.height(), &full)
                 }
-                Present::Rects => self.display.put(w, s.layer.pixels(), width as usize, s.layer.present_rects()),
+                Present::Rects => {
+                    self.display.put(w, s.layer.pixels(), width as usize, s.layer.height(), s.layer.present_rects())
+                }
             };
             if let Err(e) = result {
                 crate::log::error(&format!("present: {e}"));

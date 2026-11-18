@@ -7,6 +7,7 @@ mod icon;
 mod layer;
 mod log;
 mod rng;
+mod session;
 mod settings;
 mod text;
 mod tray;

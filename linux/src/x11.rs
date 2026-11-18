@@ -6,10 +6,19 @@
 //! - `override_redirect`, so the window manager neither decorates them nor lists them in the taskbar or alt-tab,
 //!   and they are raised again every 2 seconds like `KeepOnTop()`;
 //! - an empty input shape (XFixes), so every click goes through to the windows below.
+//!
+//! Pixels reach the window through MIT-SHM where possible: each screen is drawn straight into a shared memory
+//! segment, and a frame sends one tiny `ShmPutImage` per changed rectangle. Plain `PutImage` (every pixel copied
+//! through the socket) is the fallback, e.g. for a remote display; in a snowstorm it cost several times more.
+//!
+//! It also reads what the snow needs to know about the desktop: where each monitor's bottom panel starts, whether
+//! the active window is fullscreen, and whether the display is switched off (DPMS).
 
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::dpms::{self, ConnectionExt as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::shape;
+use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     AtomEnum, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask,
@@ -50,6 +59,15 @@ impl Rect {
             self.w as i64 * self.h as i64
         }
     }
+    /// The smallest rectangle around both.
+    pub fn union(a: &Rect, b: &Rect) -> Rect {
+        let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+        Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y)
+    }
+    /// True when `o` lies completely inside `self`.
+    pub fn contains(&self, o: &Rect) -> bool {
+        o.x >= self.x && o.y >= self.y && o.right() <= self.right() && o.bottom() <= self.bottom()
+    }
     /// The part of `self` inside a `w` x `h` surface.
     pub fn clip(&self, w: i32, h: i32) -> Rect {
         let x0 = self.x.max(0);
@@ -74,6 +92,18 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NOTIFICATION,
         _NET_WM_BYPASS_COMPOSITOR,
+        _NET_WM_WINDOW_TYPE_DESKTOP,
+        _NET_WM_WINDOW_TYPE_DOCK,
+        _NET_WM_STATE,
+        _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STRUT,
+        _NET_WM_STRUT_PARTIAL,
+        _NET_ACTIVE_WINDOW,
+        _NET_CLIENT_LIST,
+        _NET_CURRENT_DESKTOP,
+        _GTK_FRAME_EXTENTS,
         UTF8_STRING,
     }
 }
@@ -82,6 +112,57 @@ x11rb::atom_manager! {
 pub struct OverlayWindow {
     pub win: Window,
     gc: u32,
+    /// The MIT-SHM segment the X server reads this window's pixels from.
+    shm_seg: Option<shm::Seg>,
+}
+
+/// A screen's pixels in a System V shared memory segment that the X server has attached as well. The segment is
+/// already marked for removal, so the kernel frees it when both sides have let go, also after a crash.
+pub struct ShmBuffer {
+    ptr: *mut u32,
+    len: usize,
+}
+
+impl ShmBuffer {
+    fn new(len: usize) -> Option<(ShmBuffer, i32)> {
+        // SAFETY: plain System V calls; the pointer is checked before use and only used for `len` values.
+        unsafe {
+            let id = libc::shmget(libc::IPC_PRIVATE, len * 4, libc::IPC_CREAT | 0o600);
+            if id < 0 {
+                return None;
+            }
+            let ptr = libc::shmat(id, std::ptr::null(), 0);
+            if ptr as isize == -1 {
+                libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut());
+                return None;
+            }
+            Some((ShmBuffer { ptr: ptr as *mut u32, len }, id))
+        }
+    }
+}
+
+impl std::ops::Deref for ShmBuffer {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        // SAFETY: the segment is mapped for `len` u32 values until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl std::ops::DerefMut for ShmBuffer {
+    fn deref_mut(&mut self) -> &mut [u32] {
+        // SAFETY: as above, and `&mut self` makes this the only access from this process.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for ShmBuffer {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from shmat and is detached once.
+        unsafe {
+            libc::shmdt(self.ptr as *const libc::c_void);
+        }
+    }
 }
 
 pub struct Display {
@@ -96,6 +177,9 @@ pub struct Display {
     atoms: Atoms,
     cm_atom: u32,
     randr_monitors: bool,
+    has_dpms: bool,
+    /// MIT-SHM can be used: the extension is there and the server stores pixels in this machine's byte order.
+    use_shm: bool,
     /// Xft.dpi / 96 (or JULE_SCALE), at least 1.
     pub dpi_scale: f32,
     scratch: Vec<u8>,
@@ -141,11 +225,16 @@ impl Display {
             None => None,
         };
 
+        let has_dpms = conn.extension_information(dpms::X11_EXTENSION_NAME).ok().flatten().is_some();
+        let use_shm = lsb_first == cfg!(target_endian = "little")
+            && std::env::var("JULE_NO_SHM").is_err()
+            && conn.extension_information(shm::X11_EXTENSION_NAME).ok().flatten().is_some()
+            && conn.shm_query_version().ok().and_then(|c| c.reply().ok()).is_some();
         let max_request_bytes = conn.maximum_request_bytes();
         let dpi_scale = read_dpi_scale(&conn, root);
         conn.flush()?;
         crate::log::debug(&format!(
-            "X11: screen {screen_w}x{screen_h}, argb visual {:?}, randr 1.5 {randr_monitors}, lsb {lsb_first}, max request {max_request_bytes} bytes, scale {dpi_scale}",
+            "X11: screen {screen_w}x{screen_h}, argb visual {:?}, randr 1.5 {randr_monitors}, dpms {has_dpms}, shm {use_shm}, lsb {lsb_first}, max request {max_request_bytes} bytes, scale {dpi_scale}",
             argb_visual_id
         ));
         Ok(Display {
@@ -159,6 +248,8 @@ impl Display {
             atoms,
             cm_atom,
             randr_monitors,
+            has_dpms,
+            use_shm,
             dpi_scale,
             scratch: Vec::new(),
         })
@@ -219,8 +310,30 @@ impl Display {
         out
     }
 
+    /// Shared memory for a `w` x `h` screen, attached by the X server; None when MIT-SHM cannot be used (then the
+    /// screen draws into ordinary memory and `put` copies the pixels through the socket).
+    pub fn shm_buffer(&self, w: i32, h: i32) -> Option<(ShmBuffer, shm::Seg)> {
+        if !self.use_shm {
+            return None;
+        }
+        let (buf, id) = ShmBuffer::new(w as usize * h as usize)?;
+        let seg = self.conn.generate_id().ok()?;
+        // checked, so a server that cannot attach it (e.g. over the network) is noticed here
+        let attached = self.conn.shm_attach(seg, id as u32, true).ok().map(|c| c.check().is_ok()).unwrap_or(false);
+        // SAFETY: removing the id only stops new attachments; both mappings stay valid until they detach.
+        unsafe {
+            libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut());
+        }
+        if !attached {
+            crate::log::debug("MIT-SHM attach failed: sending pixels through the socket");
+            return None;
+        }
+        Some((buf, seg))
+    }
+
     /// Creates and shows a transparent, click-through, always-on-top window covering `r` (global coordinates).
-    pub fn create_overlay(&self, r: Rect) -> Res<OverlayWindow> {
+    /// `shm_seg` is the segment from `shm_buffer` that holds this window's pixels, if any.
+    pub fn create_overlay(&self, r: Rect, shm_seg: Option<shm::Seg>) -> Res<OverlayWindow> {
         let (visual, colormap) = self.argb_visual.ok_or("no 32-bit visual")?;
         let win = self.conn.generate_id()?;
         // border_pixel and colormap are required when the visual differs from the root's (else BadMatch).
@@ -284,13 +397,21 @@ impl Display {
         self.conn.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
         self.conn.map_window(win)?;
         self.conn.flush()?;
-        Ok(OverlayWindow { win, gc })
+        Ok(OverlayWindow { win, gc, shm_seg })
     }
 
     pub fn destroy_overlay(&self, w: &OverlayWindow) {
+        if let Some(seg) = w.shm_seg {
+            let _ = self.conn.shm_detach(seg);
+        }
         let _ = self.conn.free_gc(w.gc);
         let _ = self.conn.destroy_window(w.win);
         let _ = self.conn.flush();
+    }
+
+    /// Hides the window while a fullscreen app pauses the snow, and shows it again afterwards.
+    pub fn set_mapped(&self, w: &OverlayWindow, mapped: bool) {
+        let _ = if mapped { self.conn.map_window(w.win) } else { self.conn.unmap_window(w.win) };
     }
 
     /// Puts the window above all others again (the `KeepOnTop()` of `src/Layer.cs`).
@@ -298,9 +419,32 @@ impl Display {
         let _ = self.conn.configure_window(w.win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
     }
 
-    /// Sends the given rectangles of a premultiplied ARGB32 buffer (`stride` pixels per row) to the window.
-    /// Each rectangle is split into bands of rows that fit in one request.
-    pub fn put(&mut self, w: &OverlayWindow, pixels: &[u32], stride: usize, rects: &[Rect]) -> Res<()> {
+    /// Sends the given rectangles of a premultiplied ARGB32 buffer (`stride` x `height` pixels) to the window.
+    /// With shared memory each rectangle is one small request; otherwise it is split into bands of rows that fit
+    /// in one request. After shared-memory puts, call `sync` before the buffer is drawn on again.
+    pub fn put(&mut self, w: &OverlayWindow, pixels: &[u32], stride: usize, height: i32, rects: &[Rect]) -> Res<()> {
+        if let Some(seg) = w.shm_seg {
+            for r in rects.iter().filter(|r| !r.is_empty()) {
+                self.conn.shm_put_image(
+                    w.win,
+                    w.gc,
+                    stride as u16,
+                    height as u16,
+                    r.x as u16,
+                    r.y as u16,
+                    r.w as u16,
+                    r.h as u16,
+                    r.x as i16,
+                    r.y as i16,
+                    32,
+                    ImageFormat::Z_PIXMAP.into(),
+                    false,
+                    seg,
+                    0,
+                )?;
+            }
+            return Ok(());
+        }
         for r in rects {
             if r.is_empty() {
                 continue;
@@ -349,6 +493,132 @@ impl Display {
         Ok(())
     }
 
+    /// Waits until the X server has handled every request sent so far, so it has finished reading the shared
+    /// memory of the last frame before the next one is drawn into it.
+    pub fn sync(&self) -> Res<()> {
+        self.conn.get_input_focus()?.reply()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ the desktop
+    /// 32-bit values of a window property (empty when it is missing).
+    fn prop32(&self, win: Window, prop: u32, ty: impl Into<u32>, max: u32) -> Vec<u32> {
+        self.conn
+            .get_property(false, win, prop, ty, 0, max)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32().map(|v| v.collect()))
+            .unwrap_or_default()
+    }
+
+    /// Where the snow lies on each monitor: the top of a panel along its bottom edge, in the monitor's own y, or
+    /// None for the screen bottom.
+    ///
+    /// Mutter-based desktops (Cinnamon, GNOME on Xorg) draw their panels themselves, so there is no panel window to
+    /// ask; they publish one work area per monitor in `_GTK_WORKAREAS_D<desktop>`. Other desktops (Xfce, MATE,
+    /// KDE) have panel windows of type DOCK with `_NET_WM_STRUT_PARTIAL`. `_NET_WORKAREA` is one rectangle for all
+    /// monitors together, so it cannot tell monitors with and without a panel apart.
+    pub fn panel_tops(&self, monitors: &[Rect]) -> Vec<Option<i32>> {
+        let desktop = self.prop32(self.root, self.atoms._NET_CURRENT_DESKTOP, AtomEnum::CARDINAL, 1);
+        let name = format!("_GTK_WORKAREAS_D{}", desktop.first().copied().unwrap_or(0));
+        let areas: Vec<Rect> = self
+            .conn
+            .intern_atom(true, name.as_bytes())
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .filter(|r| r.atom != x11rb::NONE)
+            .map(|r| self.prop32(self.root, r.atom, AtomEnum::CARDINAL, 4 * 64))
+            .unwrap_or_default()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|v| Rect::new(v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32))
+            .collect();
+        if !areas.is_empty() {
+            return monitors.iter().map(|m| panel_top_from_workareas(*m, &areas)).collect();
+        }
+
+        let mut tops: Vec<Option<i32>> = vec![None; monitors.len()];
+        let clients = self.prop32(self.root, self.atoms._NET_CLIENT_LIST, AtomEnum::WINDOW, 4096);
+        for w in clients {
+            let ty = self.prop32(w, self.atoms._NET_WM_WINDOW_TYPE, AtomEnum::ATOM, 16);
+            if !ty.contains(&self.atoms._NET_WM_WINDOW_TYPE_DOCK) {
+                continue;
+            }
+            let mut strut = self.prop32(w, self.atoms._NET_WM_STRUT_PARTIAL, AtomEnum::CARDINAL, 12);
+            if strut.len() < 12 {
+                // the older form reserves the whole width
+                strut = self.prop32(w, self.atoms._NET_WM_STRUT, AtomEnum::CARDINAL, 4);
+                if strut.len() < 4 {
+                    continue;
+                }
+                strut.resize(12, 0);
+                strut[11] = self.screen_w.max(1) as u32 - 1;
+            }
+            if strut[3] == 0 {
+                continue;
+            }
+            // the bottom strut is counted from the bottom of the whole X screen
+            let top = self.screen_h - strut[3] as i32;
+            let (x0, x1) = (strut[10] as i32, strut[11] as i32);
+            for (r, t) in monitors.iter().zip(tops.iter_mut()) {
+                if x0 < r.right() && x1 >= r.x && top > r.y + r.h / 2 && top < r.bottom() {
+                    let local = top - r.y;
+                    *t = Some(t.map_or(local, |v| v.min(local)));
+                }
+            }
+        }
+        tops
+    }
+
+    /// The active window in global coordinates, when it is fullscreen. A window counts when the window manager
+    /// says so, or when it covers a monitor without being maximized (some games skip the hint). Maximized windows
+    /// never count: on a monitor without a panel they also cover it.
+    pub fn fullscreen_window(&self) -> Option<Rect> {
+        let a = &self.atoms;
+        let win = *self.prop32(self.root, a._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, 1).first()?;
+        if win == x11rb::NONE {
+            return None;
+        }
+        let ty = self.prop32(win, a._NET_WM_WINDOW_TYPE, AtomEnum::ATOM, 16);
+        if ty.contains(&a._NET_WM_WINDOW_TYPE_DESKTOP) || ty.contains(&a._NET_WM_WINDOW_TYPE_DOCK) {
+            return None;
+        }
+        let geo = self.conn.get_geometry(win).ok()?.reply().ok()?;
+        let pos = self.conn.translate_coordinates(win, self.root, 0, 0).ok()?.reply().ok()?;
+        let mut r = Rect::new(pos.dst_x as i32, pos.dst_y as i32, geo.width as i32, geo.height as i32);
+        // client-side decorations: the window includes an invisible shadow
+        if let [left, right, top, bottom] = self.prop32(win, a._GTK_FRAME_EXTENTS, AtomEnum::CARDINAL, 4)[..] {
+            r = Rect::new(
+                r.x + left as i32,
+                r.y + top as i32,
+                r.w - (left + right) as i32,
+                r.h - (top + bottom) as i32,
+            );
+        }
+        let state = self.prop32(win, a._NET_WM_STATE, AtomEnum::ATOM, 32);
+        if state.contains(&a._NET_WM_STATE_FULLSCREEN) {
+            return Some(r);
+        }
+        let maximized =
+            state.contains(&a._NET_WM_STATE_MAXIMIZED_VERT) && state.contains(&a._NET_WM_STATE_MAXIMIZED_HORZ);
+        if !maximized && self.monitors().iter().any(|m| r.contains(&m.rect)) {
+            return Some(r);
+        }
+        None
+    }
+
+    /// True when DPMS has switched the display off (standby, suspend or off).
+    pub fn display_off(&self) -> bool {
+        if !self.has_dpms {
+            return false;
+        }
+        match self.conn.dpms_info().ok().and_then(|c| c.reply().ok()) {
+            Some(info) => info.state && info.power_level != dpms::DPMSMode::ON,
+            None => false,
+        }
+    }
+
     /// All events that have arrived, without waiting. An error here means the X server is gone.
     pub fn poll_events(&self) -> Res<Vec<Event>> {
         let mut v = Vec::new();
@@ -357,6 +627,15 @@ impl Display {
         }
         Ok(v)
     }
+}
+
+/// The top of a panel along the bottom of monitor `m` (local y), from per-monitor work areas: the work area that
+/// lies on the monitor, if it ends above the monitor's bottom edge.
+fn panel_top_from_workareas(m: Rect, areas: &[Rect]) -> Option<i32> {
+    let wa = areas.iter().find(|a| m.contains(a) && !a.is_empty())?;
+    let gap = m.bottom() - wa.bottom();
+    // a work area that ends in the upper half is not about a bottom panel
+    (gap > 0 && wa.bottom() > m.y + m.h / 2).then(|| wa.bottom() - m.y)
 }
 
 /// The desktop's scale factor: `JULE_SCALE`, else `Xft.dpi / 96` from the X resources (set by GNOME and Cinnamon
@@ -400,6 +679,18 @@ mod tests {
         assert_eq!(Rect::new(-5, -5, 20, 20).clip(10, 10), Rect::new(0, 0, 10, 10));
         assert!(Rect::new(50, 0, 5, 5).clip(10, 10).is_empty());
         assert_eq!(Rect::new(2, 3, 4, 5).clip(100, 100), Rect::new(2, 3, 4, 5));
+    }
+
+    #[test]
+    fn workareas_per_monitor() {
+        // Linux Mint: two monitors side by side, a 100 px panel at the bottom of each (_GTK_WORKAREAS_D0)
+        let areas = [Rect::new(6144, 0, 5120, 2780), Rect::new(0, 0, 6144, 3356)];
+        assert_eq!(panel_top_from_workareas(Rect::new(0, 0, 6144, 3456), &areas), Some(3356));
+        assert_eq!(panel_top_from_workareas(Rect::new(6144, 0, 5120, 2880), &areas), Some(2780));
+        // a monitor whose panel is at the top or side keeps the snow at the screen bottom
+        let top_panel = [Rect::new(0, 40, 1920, 1040)];
+        assert_eq!(panel_top_from_workareas(Rect::new(0, 0, 1920, 1080), &top_panel), None);
+        assert_eq!(panel_top_from_workareas(Rect::new(1920, 0, 1920, 1080), &top_panel), None);
     }
 
     #[test]

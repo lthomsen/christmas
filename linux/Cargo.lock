@@ -468,7 +468,10 @@ dependencies = [
  "cairo-rs",
  "chrono",
  "ksni",
+ "libc",
+ "tokio",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

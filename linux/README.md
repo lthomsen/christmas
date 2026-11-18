@@ -3,9 +3,11 @@
 A native Rust version of JuleHygge for **Ubuntu 22.04+** and **Linux Mint 21+**. The plan, the design choices and
 the phases are in [docs/linux-plan.md](../docs/linux-plan.md).
 
-> **Status: phase 1 (skeleton).** Snowflake icon in the panel with *Afslut*, one transparent click-through overlay
-> per monitor, and falling snow (dots and crystals, wind, changing weather). There is no snow pile, figures,
-> calendar or sound yet.
+> **Status: phase 2 (ground and stopping).** Snowflake icon in the panel with *Afslut*, one transparent
+> click-through overlay per monitor, falling snow (dots and crystals, wind, changing weather), and a snow pile on
+> top of the bottom panel (or the screen bottom) with storm drifts. A fullscreen app pauses its screen; a lock,
+> the screen saver or a switched-off display stops everything; power-save follows the battery. There are no
+> figures, calendar, sound or full menu yet (settings are changed in `settings.ini`).
 
 ## Build
 
@@ -42,6 +44,8 @@ Only one JuleHygge runs per session (lock file `$XDG_RUNTIME_DIR/julehygge.lock`
 | `JULE_DEBUG=1` | debug lines in `$XDG_RUNTIME_DIR/julehygge-debug.log`, including fps, ms per frame and CPU % every 5 s |
 | `JULE_FPS=N` | fixed frame rate (for measurements) |
 | `JULE_SCALE=N` | overrides the desktop scale factor (otherwise `Xft.dpi / 96`) |
+| `JULE_DEEPSNOW=1` | starts with a full snow pile |
+| `JULE_NO_SHM=1` | sends pixels through the socket instead of MIT-SHM shared memory (to compare, or to rule it out) |
 
 Settings: `~/.config/JuleHygge/settings.ini`, same keys as on Windows. Errors: `~/.local/state/JuleHygge/error.log`.
 
@@ -68,8 +72,9 @@ On **Linux Mint** and on **Ubuntu 24.04 or newer (Wayland)**:
 |---|---|---|
 | `src/main.rs` | arguments, single instance | `Program.cs` |
 | `src/controller.rs` | main loop, frame timer, wind, weather, screens, test aids | `Controller.cs` |
-| `src/layer.rs` | one screen's scene and pixel buffer: snow, dirty rectangles | `Layer.cs` |
-| `src/x11.rs` | X11: monitors, overlay windows, click-through, sending pixels | Win32 parts of `Layer.cs` |
+| `src/layer.rs` | one screen's scene and pixel buffer: snow, snow pile, fullscreen pause, dirty rectangles | `Layer.cs` |
+| `src/x11.rs` | X11: monitors, overlay windows, click-through, MIT-SHM, panels, fullscreen window, DPMS | Win32 parts of `Layer.cs` |
+| `src/session.rs` | lock and screen saver (D-Bus), battery | `SessionSwitch`, `PowerWatcher.cs` |
 | `src/tray.rs`, `src/icon.rs` | panel icon and menu; the icon drawn with Cairo | `NotifyIcon`, `build.ps1` |
 | `src/weather.rs` | changing weather (same random numbers as Windows and macOS) | `Weather.cs` |
 | `src/settings.rs` | `settings.ini` | `Settings.cs` |

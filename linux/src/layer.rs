@@ -1,7 +1,8 @@
 //! One screen's scene: a premultiplied ARGB32 pixel buffer the size of the monitor, and what is drawn on it.
 //! Ported from `src/Layer.cs` (and `macos/Sources/JuleHygge/Overlay.swift`); origin top left, as in both.
 //!
-//! Phase 1: falling snow (dots and crystals). The ground pile, lights, elves, snowman, plow and Santa follow in
+//! Phase 2: falling snow (dots and crystals) and the snow pile on the ground (at the top of a bottom panel, or the
+//! screen bottom), with storm drifts and the fullscreen pause. Lights, elves, snowman, plow and Santa follow in
 //! later phases (see docs/linux-plan.md).
 //!
 //! The Windows optimisations are kept, because the overlay covers whole 4K screens:
@@ -33,7 +34,16 @@ pub struct SceneState {
     pub snow_on: bool,
     /// Drifts slowly between ~0.6 and ~1.4.
     pub snow_intensity: f32,
+    /// Snow settles in a pile on the ground (setting `SnowGround`).
+    pub snow_ground: bool,
+    /// The active window, in global coordinates, if it is fullscreen. A screen it covers either pauses (setting
+    /// `PauseFullscreen`) or moves its ground to the screen bottom, because the app hides the panel.
+    pub fullscreen: Option<Rect>,
+    pub pause_fullscreen: bool,
 }
+
+/// Width in pixels of one column of the snow pile, as on Windows.
+const HEAP_STEP: usize = 4;
 
 struct Flake {
     x: f32,
@@ -52,19 +62,27 @@ struct Flake {
     catches: bool,
 }
 
+/// Memory that holds a screen's pixels: a plain `Vec<u32>`, or a shared memory segment the X server reads
+/// directly (`x11::ShmBuffer`).
+pub trait PixelStore: std::ops::DerefMut<Target = [u32]> {}
+impl<T: std::ops::DerefMut<Target = [u32]>> PixelStore for T {}
+
 /// The pixel buffer with a Cairo surface drawing into the same memory.
 /// Field order matters: the context and surface are dropped before the pixels they point into.
 struct Canvas {
     cr: Context,
     surface: ImageSurface,
-    pixels: Vec<u32>,
+    pixels: Box<dyn PixelStore>,
 }
 
 impl Canvas {
-    fn new(w: i32, h: i32) -> Res<Canvas> {
-        let mut pixels = vec![0u32; w as usize * h as usize];
+    fn new(w: i32, h: i32, mut pixels: Box<dyn PixelStore>) -> Res<Canvas> {
+        if pixels.len() != w as usize * h as usize {
+            return Err("pixel buffer has the wrong size".into());
+        }
+        pixels.fill(0);
         // SAFETY: the buffer is w*h*4 bytes with a stride of w*4 (valid for ARGB32), it is never reallocated
-        // (its length never changes), and it outlives the surface and context (field order above).
+        // (a boxed store keeps its memory in place), and it outlives the surface and context (field order above).
         let surface = unsafe {
             ImageSurface::create_for_data_unsafe(pixels.as_mut_ptr() as *mut u8, Format::ARgb32, w, h, w * 4)?
         };
@@ -94,6 +112,13 @@ pub struct Layer {
     s: f32,
     dpi_scale: f32,
     ground_y: f32,
+    /// Top of a panel at the bottom of this screen (local y), or the screen height when there is none.
+    panel_y: f32,
+    /// Height of the snow pile per HEAP_STEP pixels.
+    heap: Vec<f32>,
+    heap_moved: Vec<f32>,
+    /// A fullscreen app covers this screen and the scene is paused (the controller hides the window).
+    paused: bool,
     canvas: Canvas,
     rng: Rng,
     flakes: Vec<Flake>,
@@ -104,18 +129,39 @@ pub struct Layer {
 }
 
 impl Layer {
+    #[cfg(test)]
     pub fn new(rect: Rect, primary: bool, dpi_scale: f32, seed: u64) -> Res<Layer> {
+        Self::with_pixels(rect, primary, dpi_scale, seed, Box::new(vec![0u32; rect.w as usize * rect.h as usize]))
+    }
+
+    /// A layer drawing into `pixels` (rect.w * rect.h values).
+    pub fn with_pixels(
+        rect: Rect,
+        primary: bool,
+        dpi_scale: f32,
+        seed: u64,
+        pixels: Box<dyn PixelStore>,
+    ) -> Res<Layer> {
         let (w, h) = (rect.w, rect.h);
+        let s = (h as f32 / 1080.0).max(0.6);
+        let mut heap = vec![0.0; w as usize / HEAP_STEP + 2];
+        // JULE_DEEPSNOW=1 starts with a full snow drift (for testing the snow plow).
+        if std::env::var("JULE_DEEPSNOW").is_ok_and(|v| v == "1") {
+            heap.fill(18.0 * s);
+        }
         Ok(Layer {
             rect,
             primary,
             w,
             h,
-            s: (h as f32 / 1080.0).max(0.6),
+            s,
             dpi_scale: dpi_scale.max(1.0),
-            // Phase 2 moves this to the top of a bottom panel.
             ground_y: h as f32,
-            canvas: Canvas::new(w, h)?,
+            panel_y: h as f32,
+            heap_moved: vec![0.0; heap.len()],
+            heap,
+            paused: false,
+            canvas: Canvas::new(w, h, pixels)?,
             rng: Rng::new(seed),
             flakes: Vec::new(),
             dirty: Vec::new(),
@@ -127,6 +173,9 @@ impl Layer {
 
     pub fn width(&self) -> i32 {
         self.w
+    }
+    pub fn height(&self) -> i32 {
+        self.h
     }
     pub fn pixels(&self) -> &[u32] {
         &self.canvas.pixels
@@ -141,6 +190,17 @@ impl Layer {
     pub fn flake_count(&self) -> usize {
         self.flakes.len()
     }
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+    /// The top of a bottom panel in local y (None: no panel, the snow lies on the screen bottom).
+    pub fn set_panel_top(&mut self, y: Option<i32>) {
+        let y = y.map_or(self.h as f32, |y| (y as f32).clamp(self.h as f32 * 0.5, self.h as f32));
+        if y != self.panel_y {
+            crate::log::debug(&format!("screen at {},{}: ground at y={y}", self.rect.x, self.rect.y));
+            self.panel_y = y;
+        }
+    }
 
     fn mark(&mut self, x: f32, y: f32, w: f32, h: f32) {
         self.dirty.push(Rect::new(
@@ -153,6 +213,27 @@ impl Layer {
 
     // ------------------------------------------------------------------ one frame
     pub fn frame(&mut self, dt: f32, st: &SceneState) -> Present {
+        let fullscreen = st.fullscreen.is_some_and(|fs| fs.contains(&self.rect));
+        // With "pause on fullscreen" off, a fullscreen app hides the panel, so the snow piles up at the very
+        // bottom of the screen instead.
+        self.ground_y = if fullscreen { self.h as f32 } else { self.panel_y };
+        if fullscreen && st.pause_fullscreen {
+            if !self.paused {
+                // Leave an empty buffer behind; the controller unmaps the window, so a fullscreen game is not
+                // composited under a see-through window, and maps it again (with a full present) afterwards.
+                self.canvas.surface.flush();
+                self.canvas.pixels.fill(0);
+                self.canvas.surface.mark_dirty();
+                self.prev_dirty.clear();
+                self.paused = true;
+            }
+            return Present::Nothing;
+        }
+        if self.paused {
+            self.paused = false;
+            self.full_present = true;
+        }
+
         self.update_snow(dt, st);
 
         // Clear what was drawn last frame (Cairo must finish before the buffer is touched directly).
@@ -161,6 +242,7 @@ impl Layer {
         self.clear_rects(&cleared);
         self.canvas.surface.mark_dirty();
 
+        self.draw_ground();
         self.draw_snow();
         self.canvas.surface.flush();
 
@@ -172,8 +254,9 @@ impl Layer {
     }
 
     /// Collects the rectangles that changed on screen: last frame's (now cleared) and this frame's.
-    /// Unlike Windows, which merges them into three boxes for UpdateLayeredWindowIndirect, X11 gets each small
-    /// rectangle on its own: a few thousand tiny PutImage requests cost far less than one full 4K upload.
+    /// Unlike Windows, which merges them into three boxes for UpdateLayeredWindowIndirect, X11 gets small
+    /// rectangles: a few thousand tiny requests cost far less than one full 4K upload. A flake's old and new
+    /// rectangle mostly overlap, so neighbours are merged first (`merge_rects`), which halves the requests.
     fn plan_present(&mut self, cleared: &[Rect]) -> Present {
         if self.full_present {
             self.full_present = false;
@@ -192,6 +275,7 @@ impl Layer {
         if self.present.is_empty() {
             return Present::Nothing;
         }
+        merge_rects(&mut self.present);
         // mostly everything changed: one full update is cheaper
         if area > self.w as i64 * self.h as i64 / 2 {
             return Present::Full;
@@ -252,14 +336,93 @@ impl Layer {
             } else if f.x > w + 60.0 {
                 f.x -= w + 120.0;
             }
-            // Phase 2: flakes add to the ground pile here (Deposit) and land on its surface (HeapAt).
-            if f.y >= ground {
+            // Phase 5: some flakes land on a window's top edge here.
+            if f.y >= ground - heap_at(&self.heap, f.x) {
+                let (x, r) = (f.x, f.r);
+                if st.snow_ground {
+                    self.deposit(x, r, st);
+                }
                 if self.flakes.len() > target {
                     self.flakes.swap_remove(i);
                 } else {
                     let nf = self.new_flake(false, st);
                     self.flakes[i] = nf;
                 }
+            }
+        }
+        self.update_heap(dt, st);
+    }
+
+    /// Storm drifts, sliding, melting and the height limit of the pile (the second half of `UpdateSnow` in
+    /// `src/Layer.cs`).
+    fn update_heap(&mut self, dt: f32, st: &SceneState) {
+        let s = self.s;
+        let n = self.heap.len();
+        // Snowstorm: the wind carries snow along the pile, so it drifts up against the downwind screen edge, and
+        // flakes settle in long soft waves (the dune factor in `deposit`). Drifts may grow taller and sink back
+        // slowly afterwards.
+        let storm = st.snow_level == 2 && st.snow_on;
+        let wind_norm = (st.wind / 140.0).clamp(-1.5, 1.5);
+        if storm && wind_norm.abs() > 0.15 && n > 2 {
+            let rate = 0.02 * wind_norm.abs() * dt;
+            for (m, h) in self.heap_moved.iter_mut().zip(&self.heap) {
+                *m = h * rate;
+            }
+            for i in 0..n {
+                let Some(j) = i.checked_add_signed(if wind_norm > 0.0 { 1 } else { -1 }).filter(|&j| j < n) else {
+                    continue;
+                };
+                self.heap[i] -= self.heap_moved[i];
+                self.heap[j] += self.heap_moved[i];
+            }
+        }
+        let max_h = if storm { 30.0 } else { 18.0 } * s;
+        let slope = 1.2 * s;
+        for i in 0..n - 1 {
+            let d = self.heap[i] - self.heap[i + 1];
+            if d > slope {
+                let m = (d - slope) * 0.3;
+                self.heap[i] -= m;
+                self.heap[i + 1] += m;
+            } else if d < -slope {
+                let m = (-d - slope) * 0.3;
+                self.heap[i] += m;
+                self.heap[i + 1] -= m;
+            }
+        }
+        // Phase 5: snow falling off a window that went away lands in the pile here.
+        let melt = !st.snow_on || !st.snow_ground;
+        let (ox, dpi) = (self.rect.x as f64, self.dpi_scale as f64);
+        for (i, h) in self.heap.iter_mut().enumerate() {
+            if melt {
+                *h = (*h - 3.0 * s * dt).max(0.0);
+            }
+            // A full pile keeps soft bumps: the limit wavers along the screen (in global x, so screens line up),
+            // and above it the snow sinks back slowly instead of being cut off.
+            let gx = (i * HEAP_STEP) as f64 + ox;
+            let lim =
+                max_h * (0.78 + 0.22 * (0.6 * (gx / (37.0 * dpi)).sin() + 0.4 * (gx / (13.7 * dpi)).sin()) as f32);
+            if *h > lim {
+                *h = (*h - 2.0 * s * dt).max(lim);
+            }
+        }
+    }
+
+    /// A landed flake of radius `r` adds to the pile around `x`.
+    fn deposit(&mut self, x: f32, r: f32, st: &SceneState) {
+        let mut amount = 0.35 * r;
+        if st.snow_level == 2 {
+            // dunes: long waves in global x (so they line up across screens), slowly wandering with the wind
+            let gx = x as f64 + self.rect.x as f64;
+            let dir = if st.wind > 0.0 { 1.0 } else { -1.0 };
+            let dune = 0.5
+                + 0.5 * (gx / (240.0 * self.s as f64) * 2.0 * std::f64::consts::PI - st.time as f64 * 0.03 * dir).sin();
+            amount *= 0.3 + 1.4 * dune as f32;
+        }
+        let idx = (x / HEAP_STEP as f32) as isize;
+        for k in -1..=1isize {
+            if let Some(h) = usize::try_from(idx + k).ok().and_then(|j| self.heap.get_mut(j)) {
+                *h += if k == 0 { amount } else { amount * 0.5 };
             }
         }
     }
@@ -323,6 +486,34 @@ impl Layer {
         }
     }
 
+    fn draw_ground(&mut self) {
+        let max = self.heap.iter().cloned().fold(0.0f32, f32::max);
+        if max < 0.5 {
+            return;
+        }
+        let (g, s) = (self.ground_y, self.s);
+        self.mark(0.0, g - max - 4.0 * s, self.w as f32, max + 8.0 * s);
+        let cr = &self.canvas.cr;
+        let top = |cr: &Context| {
+            for (i, h) in self.heap.iter().enumerate() {
+                cr.line_to((i * HEAP_STEP) as f64, (g - h) as f64);
+            }
+        };
+        cr.new_path();
+        top(cr);
+        cr.line_to(self.w as f64, g as f64 + 1.0);
+        cr.line_to(0.0, g as f64 + 1.0);
+        cr.close_path();
+        cr.set_source_rgba(248.0 / 255.0, 252.0 / 255.0, 1.0, 245.0 / 255.0);
+        let _ = cr.fill();
+        cr.new_path();
+        top(cr);
+        cr.set_source_rgba(170.0 / 255.0, 200.0 / 255.0, 230.0 / 255.0, 110.0 / 255.0);
+        cr.set_line_width((1.5 * s) as f64);
+        cr.set_line_join(cairo::LineJoin::Round);
+        let _ = cr.stroke();
+    }
+
     fn draw_snow(&mut self) {
         // Dots go straight into the buffer; Cairo has been flushed by the caller.
         for i in 0..self.flakes.len() {
@@ -362,6 +553,12 @@ impl Layer {
         }
     }
 
+    /// Average height of the pile (the snow plow comes when it gets high, phase 3).
+    #[cfg(test)]
+    fn heap_average(&self) -> f32 {
+        self.heap.iter().sum::<f32>() / self.heap.len() as f32
+    }
+
     // ------------------------------------------------------------------ test aid
     /// Writes the overlay over a dark background as a PNG (`--snapshot`), like the macOS version.
     pub fn write_snapshot(&self, path: &std::path::Path) -> Res<()> {
@@ -379,12 +576,60 @@ impl Layer {
     }
 }
 
+/// Merges rectangles that lie close together when their bounding box is hardly bigger than the two of them (a
+/// flake's position last frame and now, or overlapping flakes), so the X server gets fewer, non-overlapping
+/// copies. Sorted into bands of rows first, so neighbours meet; each rectangle is compared with a few before it.
+fn merge_rects(rects: &mut Vec<Rect>) {
+    const BAND: i32 = 64;
+    const LOOK_BACK: usize = 6;
+    rects.sort_unstable_by_key(|r| (r.y / BAND, r.x));
+    let mut out: Vec<Rect> = Vec::with_capacity(rects.len());
+    'next: for r in rects.drain(..) {
+        let start = out.len().saturating_sub(LOOK_BACK);
+        for o in out[start..].iter_mut() {
+            let u = Rect::union(o, &r);
+            // worth it when the union wastes at most a quarter of what the two cover
+            if u.area() * 4 <= (o.area() + r.area()) * 5 {
+                *o = u;
+                continue 'next;
+            }
+        }
+        out.push(r);
+    }
+    *rects = out;
+}
+
+/// Height of the pile at `x`, between two columns.
+fn heap_at(heap: &[f32], x: f32) -> f32 {
+    let fx = x / HEAP_STEP as f32;
+    let i = fx.floor();
+    if i < 0.0 {
+        return heap[0];
+    }
+    let i = i as usize;
+    if i >= heap.len() - 1 {
+        return heap[heap.len() - 1];
+    }
+    let t = fx - i as f32;
+    heap[i] * (1.0 - t) + heap[i + 1] * t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn state() -> SceneState {
-        SceneState { time: 5.0, wind: 20.0, snow_amount: 1.0, snow_level: 1, snow_on: true, snow_intensity: 1.0 }
+        SceneState {
+            time: 5.0,
+            wind: 20.0,
+            snow_amount: 1.0,
+            snow_level: 1,
+            snow_on: true,
+            snow_intensity: 1.0,
+            snow_ground: true,
+            fullscreen: None,
+            pause_fullscreen: true,
+        }
     }
 
     #[test]
@@ -417,6 +662,95 @@ mod tests {
         l.frame(0.05, &st);
         assert_eq!(l.frame(0.05, &st), Present::Nothing);
         assert!(l.pixels().iter().all(|p| *p == 0));
+    }
+
+    #[test]
+    fn snow_piles_up_on_the_panel() {
+        let mut l = Layer::new(Rect::new(0, 0, 640, 360), true, 1.0, 7).unwrap();
+        l.set_panel_top(Some(330));
+        let st = state();
+        // five minutes: a small screen has few flakes, so the pile grows slowly (as on Windows)
+        for _ in 0..6000 {
+            l.frame(0.05, &st);
+        }
+        assert!(l.heap_average() > 2.0, "pile {}", l.heap_average());
+        // the pile stays within its limit (18 points at this size) and sits on the panel, not below it
+        let s = l.s;
+        assert!(l.heap.iter().all(|h| *h <= 18.0 * s + 1.0));
+        let w = l.width() as usize;
+        assert!(l.pixels()[332 * w..].iter().all(|p| *p == 0), "something drawn over the panel");
+        assert!(l.pixels()[325 * w..330 * w].iter().any(|p| *p >> 24 > 200), "no snow on the ground");
+    }
+
+    #[test]
+    fn no_ground_snow_means_no_pile_and_it_melts() {
+        let mut l = Layer::new(Rect::new(0, 0, 640, 360), true, 1.0, 3).unwrap();
+        let st = state();
+        for _ in 0..6000 {
+            l.frame(0.05, &st);
+        }
+        assert!(l.heap_average() > 2.0);
+        let off = SceneState { snow_ground: false, ..st };
+        for _ in 0..400 {
+            l.frame(0.05, &off);
+        }
+        assert_eq!(l.heap_average(), 0.0);
+    }
+
+    #[test]
+    fn storm_drifts_downwind() {
+        // a half-height pile and storm wind, but no new flakes, so only the drift moves snow
+        let mut l = Layer::new(Rect::new(0, 0, 640, 360), true, 1.0, 5).unwrap();
+        let h0 = 6.0 * l.s;
+        l.heap.fill(h0);
+        let storm = SceneState { wind: 150.0, snow_level: 2, snow_amount: 2.0, snow_intensity: 0.0, ..state() };
+        for _ in 0..2400 {
+            l.frame(0.05, &storm);
+        }
+        let n = l.heap.len();
+        let (left, right) = (l.heap[..n / 4].iter().sum::<f32>(), l.heap[n - n / 4..].iter().sum::<f32>());
+        // slow on purpose, as on Windows: about 2% of a column's snow moves one column on per second
+        assert!(right > left * 1.05, "left {left} right {right}");
+        assert!(l.heap[n - 1] > h0, "no drift against the downwind edge");
+    }
+
+    #[test]
+    fn fullscreen_pauses_and_resumes() {
+        let rect = Rect::new(100, 0, 320, 200);
+        let mut l = Layer::new(rect, true, 1.0, 9).unwrap();
+        let st = state();
+        for _ in 0..20 {
+            l.frame(0.05, &st);
+        }
+        let fs = SceneState { fullscreen: Some(Rect::new(0, 0, 1000, 1000)), ..st };
+        assert_eq!(l.frame(0.05, &fs), Present::Nothing);
+        assert!(l.paused());
+        assert!(l.pixels().iter().all(|p| *p == 0));
+        assert_eq!(l.frame(0.05, &st), Present::Full);
+        assert!(!l.paused());
+        // a fullscreen window on another screen changes nothing here
+        let other = SceneState { fullscreen: Some(Rect::new(1000, 0, 500, 500)), ..st };
+        assert_ne!(l.frame(0.05, &other), Present::Nothing);
+        assert!(!l.paused());
+        // with the pause off, the ground moves to the screen bottom under the hidden panel
+        l.set_panel_top(Some(180));
+        let no_pause = SceneState { pause_fullscreen: false, ..fs };
+        l.frame(0.05, &no_pause);
+        assert_eq!(l.ground_y, 200.0);
+        l.frame(0.05, &st);
+        assert_eq!(l.ground_y, 180.0);
+    }
+
+    #[test]
+    fn merged_rects_cover_everything() {
+        // a flake's old and new box merge into one; boxes far apart stay apart
+        let mut v = vec![Rect::new(100, 100, 20, 20), Rect::new(500, 100, 20, 20), Rect::new(102, 103, 20, 20)];
+        let before = v.clone();
+        merge_rects(&mut v);
+        assert_eq!(v.len(), 2);
+        for r in &before {
+            assert!(v.iter().any(|m| m.contains(r)), "{r:?} lost");
+        }
     }
 
     #[test]
