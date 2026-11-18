@@ -8,13 +8,14 @@ mod layer;
 mod log;
 mod rng;
 mod settings;
+mod text;
 mod tray;
 mod weather;
 mod x11;
 
 use std::path::PathBuf;
 
-pub const VERSION: &str = env!("JULE_VERSION");
+pub const VERSION: &str = env!("APP_VERSION");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,7 +42,7 @@ fn main() {
         Ok(f) => match f.try_lock() {
             Ok(()) => Some(f),
             Err(std::fs::TryLockError::WouldBlock) => {
-                eprintln!("JuleHygge kører allerede.");
+                eprintln!("{}", text::ALREADY_RUNNING);
                 return;
             }
             Err(std::fs::TryLockError::Error(e)) => {

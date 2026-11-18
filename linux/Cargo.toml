@@ -3,7 +3,7 @@ name = "julehygge"
 version = "0.0.0"            # the real version comes from VERSION=x.y.z at build time (see build.rs)
 edition = "2021"
 rust-version = "1.89"        # std::fs::File::try_lock (single instance)
-description = "JuleHygge for Linux: snow, nisser and an advent calendar over the desktop"
+description = "JuleHygge for Linux: snow, elves and an advent calendar over the desktop"
 license = "MIT"
 publish = false
 

@@ -64,6 +64,7 @@ linux/
     settings.rs       // ~/.config/JuleHygge/settings.ini ← Settings.cs
     updater.rs        // GitHub releases                ← Updater.cs
     icon.rs           // snowflake icon drawn with Cairo (tray, window, .desktop)
+    text.rs           // all user-facing text (Danish); code and comments are English
 ```
 
 ## Design per area
@@ -122,8 +123,9 @@ As `Updater.cs`: check 1 minute after start and every 6 hours, download `JuleHyg
 ### CI
 `.github/workflows/linux-build.yml`: on push and pull request run `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `build.sh`, keep the tarball as an artifact; on a published release build with `VERSION=<tag>` and attach the tarball, like the Windows and macOS workflows.
 
-## Test aids (same names as Windows/macOS)
-`--kalender`, `--julemand`, `--sneplov[=N]`, `--effekt=N`, `--lyd-test=DIR`, `--snapshot=DIR[,SEC]` (saves each overlay surface and the calendar as PNG; no screen capture needed), `JULE_SETTINGS`, `JULE_DATE`, `JULE_DEBUG=1` (log in `$XDG_RUNTIME_DIR/julehygge-debug.log`), `JULE_FPS`, `JULE_DEEPSNOW=1`, `JULE_NISSE_SECONDS`, `JULE_NO_SUPERVISOR=1`, `JULE_UPDATE_VERSION`, `JULE_VEJR_TID=TT:MM`, plus `JULE_SCALE`.
+## Test aids
+The Linux code is English throughout, so the test aids get English names; the Danish names used on Windows and macOS are accepted as aliases, so the same test scripts work everywhere:
+`--calendar` (`--kalender`), `--santa` (`--julemand`), `--plow[=N]` (`--sneplov[=N]`), `--effect=N` (`--effekt=N`), `--sound-test=DIR` (`--lyd-test=DIR`), `--snapshot=DIR[,SEC]` (saves each overlay surface and the calendar as PNG; no screen capture needed), `JULE_SETTINGS`, `JULE_DATE`, `JULE_DEBUG=1` (log in `$XDG_RUNTIME_DIR/julehygge-debug.log`), `JULE_FPS`, `JULE_DEEPSNOW=1`, `JULE_ELF_SECONDS` (`JULE_NISSE_SECONDS`), `JULE_NO_SUPERVISOR=1`, `JULE_UPDATE_VERSION`, `JULE_WEATHER_TIME=HH:MM` (`JULE_VEJR_TID`), plus `JULE_SCALE`. The `JULE_` prefix is part of the product name and stays. User-facing text stays Danish and lives in `linux/src/text.rs`.
 
 Unlike the other versions, the pure logic gets `cargo test` unit tests: settings round-trip with old files, calendar door rules per date, snowman stage per day, and `Weather` against a fixture of day schedules produced by the Windows or macOS build (the sequence must be identical on all three).
 

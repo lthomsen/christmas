@@ -151,7 +151,7 @@ impl Controller {
     }
 
     // ------------------------------------------------------------------ scene state
-    /// 0 light ... 2 storm, gliding. Setting 3 ("Skiftende vejr") lets the weather choose.
+    /// 0 light ... 2 storm, gliding. Setting 3 (changing weather) lets the weather choose.
     fn snow_amount(&mut self) -> f32 {
         if self.cfg.snow_level == 3 { self.weather.amount() as f32 } else { self.cfg.snow_level as f32 }
     }
@@ -255,7 +255,7 @@ impl Controller {
                 self.can_overlay = ok;
                 if let Some(t) = &self.tray {
                     let text = status_text(ok);
-                    let _ = t.update(move |tray: &mut crate::tray::JuleTray| tray.status = text);
+                    let _ = t.update(move |tray: &mut crate::tray::AppTray| tray.status = text);
                 }
                 self.build_screens();
             }
@@ -336,7 +336,7 @@ impl Controller {
 }
 
 fn status_text(can_overlay: bool) -> String {
-    if can_overlay { String::new() } else { "Kræver en compositor - sneen er slået fra".into() }
+    if can_overlay { String::new() } else { crate::text::NEEDS_COMPOSITOR.into() }
 }
 
 /// With JULE_DEBUG=1: the real frame rate, the time spent per frame, and the process's CPU use, every 5 seconds.

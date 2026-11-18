@@ -1,4 +1,5 @@
-//! "Skiftende vejr": the snow changes by itself between light snow, normal and snowstorm over the day.
+//! Changing weather (snow level 3, the default): the snow changes by itself between light snow, normal and
+//! snowstorm over the day.
 //!
 //! Line for line the same as `src/Weather.cs` and `macos/Sources/JuleHygge/Weather.swift`, with the same random
 //! numbers, so the day's weather is identical on Windows, macOS and Linux, after a restart and on every screen.
@@ -76,15 +77,15 @@ pub fn amount_at(spells: &[Spell], before: i32, seconds: f64) -> f64 {
 /// The weather right now, looked up at most once a second.
 pub struct Weather {
     cached: Option<(Instant, f64)>,
-    /// JULE_VEJR_TID=HH:MM starts the day's weather at that time of day (the clock runs on from there),
-    /// so a change can be watched without waiting for it (as on macOS).
+    /// JULE_WEATHER_TIME=HH:MM starts the day's weather at that time of day (the clock runs on from there),
+    /// so a change can be watched without waiting for it. The macOS name JULE_VEJR_TID works too.
     start_at: Option<f64>,
     started: Instant,
 }
 
 impl Weather {
     pub fn new() -> Self {
-        let start_at = std::env::var("JULE_VEJR_TID").ok().and_then(|v| {
+        let start_at = std::env::var("JULE_WEATHER_TIME").or_else(|_| std::env::var("JULE_VEJR_TID")).ok().and_then(|v| {
             let (h, m) = v.trim().split_once(':')?;
             Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0)
         });

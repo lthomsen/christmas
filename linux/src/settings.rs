@@ -1,6 +1,7 @@
 //! Settings, saved in `$XDG_CONFIG_HOME/JuleHygge/settings.ini` (default `~/.config/JuleHygge/settings.ini`).
 //!
 //! Same keys, defaults and limits as `src/Settings.cs`, so a settings file can be copied between Windows and Linux.
+//! The keys in the file are a shared format and keep their names (e.g. `Nisser`, `NisseCount` for the elves).
 //! New fields must have a default, so old files keep working. `JULE_SETTINGS=<path>` uses another file, so tests
 //! never touch the real settings.
 
@@ -14,7 +15,8 @@ pub struct Settings {
     pub snow: bool,
     pub snow_ground: bool,
     pub santa: bool,
-    pub nisser: bool,
+    /// Elves (Danish "nisser") walking on the ground. Key `Nisser`.
+    pub elves: bool,
     pub lights: bool,
     pub pause_fullscreen: bool,
     pub snowman: bool,
@@ -26,8 +28,8 @@ pub struct Settings {
     pub plow_sound: bool,
     /// 0 light, 1 normal, 2 snowstorm, 3 changing weather (the default).
     pub snow_level: i32,
-    /// Per screen.
-    pub nisse_count: i32,
+    /// Elves per screen. Key `NisseCount`.
+    pub elf_count: i32,
     /// 0 off, 1 always on, 2 only on battery.
     pub power_save: i32,
     /// 0 low, 1 medium, 2 high.
@@ -52,7 +54,7 @@ impl Default for Settings {
             snow: true,
             snow_ground: true,
             santa: true,
-            nisser: true,
+            elves: true,
             lights: true,
             pause_fullscreen: true,
             snowman: true,
@@ -62,7 +64,7 @@ impl Default for Settings {
             sound: false,
             plow_sound: false,
             snow_level: 3,
-            nisse_count: 3,
+            elf_count: 3,
             power_save: 2,
             sound_level: 1,
             frame_rate: 20,
@@ -125,7 +127,7 @@ impl Settings {
             snow: b("Snow", def.snow),
             snow_ground: b("SnowGround", def.snow_ground),
             santa: b("Santa", def.santa),
-            nisser: b("Nisser", def.nisser),
+            elves: b("Nisser", def.elves),
             lights: b("Lights", def.lights),
             pause_fullscreen: b("PauseFullscreen", def.pause_fullscreen),
             snowman: b("Snowman", def.snowman),
@@ -137,7 +139,7 @@ impl Settings {
             sound_level: i("SoundLevel", def.sound_level).clamp(0, 2),
             frame_rate,
             snow_level: i("SnowLevel", def.snow_level).clamp(0, 3),
-            nisse_count: i("NisseCount", def.nisse_count).clamp(1, 12),
+            elf_count: i("NisseCount", def.elf_count).clamp(1, 12),
             power_save: i("PowerSave", def.power_save).clamp(0, 2),
             auto_update: b("AutoUpdate", def.auto_update),
             last_version: d.get("LastVersion").cloned().unwrap_or_default(),
@@ -161,7 +163,7 @@ impl Settings {
             format!("Snow={}", b(self.snow)),
             format!("SnowGround={}", b(self.snow_ground)),
             format!("Santa={}", b(self.santa)),
-            format!("Nisser={}", b(self.nisser)),
+            format!("Nisser={}", b(self.elves)),
             format!("Lights={}", b(self.lights)),
             format!("PauseFullscreen={}", b(self.pause_fullscreen)),
             format!("Snowman={}", b(self.snowman)),
@@ -172,7 +174,7 @@ impl Settings {
             format!("PlowSound={}", b(self.plow_sound)),
             format!("SoundLevel={}", self.sound_level),
             format!("SnowLevel={}", self.snow_level),
-            format!("NisseCount={}", self.nisse_count),
+            format!("NisseCount={}", self.elf_count),
             format!("PowerSave={}", self.power_save),
             format!("FrameRate={}", self.frame_rate),
             format!("AutoUpdate={}", b(self.auto_update)),
@@ -237,7 +239,7 @@ mod tests {
         assert!(!s.snow);
         assert_eq!(s.frame_rate, 20);
         assert_eq!(s.snow_level, 3);
-        assert_eq!(s.nisse_count, 1);
+        assert_eq!(s.elf_count, 1);
         assert_eq!(s.opened_doors.iter().copied().collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(s.first_run, NaiveDate::from_ymd_opt(2026, 11, 1));
     }

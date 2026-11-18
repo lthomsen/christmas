@@ -1,8 +1,8 @@
 //! The snowflake icon in the panel (StatusNotifierItem): Ubuntu shows it through its AppIndicator extension,
 //! Cinnamon (Mint) natively. Corresponds to the `NotifyIcon` in `src/Controller.cs`.
 //!
-//! Phase 1 menu: a status line and "Afslut". The full menu (settings, calendar, Santa) follows in later phases.
-//! Tray hosts deliver no double-clicks, so "Kald julemanden" will be a menu item.
+//! Phase 1 menu: a status line and Quit. The full menu (settings, calendar, Santa) follows in later phases.
+//! Tray hosts deliver no double-clicks, so "call Santa" will be a menu item. Menu texts live in `text.rs`.
 //!
 //! The tray runs on its own thread; it only sends messages to the main loop.
 
@@ -14,16 +14,16 @@ pub enum TrayMsg {
     Quit,
 }
 
-pub struct JuleTray {
+pub struct AppTray {
     tx: Sender<TrayMsg>,
     icons: Vec<ksni::Icon>,
-    /// Shown greyed out at the top of the menu and in the tooltip (e.g. "Kræver en compositor"), or empty.
+    /// Shown greyed out at the top of the menu and in the tooltip (e.g. `text::NEEDS_COMPOSITOR`), or empty.
     pub status: String,
 }
 
-pub type TrayHandle = ksni::blocking::Handle<JuleTray>;
+pub type TrayHandle = ksni::blocking::Handle<AppTray>;
 
-impl ksni::Tray for JuleTray {
+impl ksni::Tray for AppTray {
     fn id(&self) -> String {
         "julehygge".into()
     }
@@ -49,7 +49,7 @@ impl ksni::Tray for JuleTray {
         }
         items.push(
             StandardItem {
-                label: "Afslut".into(),
+                label: crate::text::QUIT.into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|t: &mut Self| {
                     let _ = t.tx.send(TrayMsg::Quit);
@@ -72,7 +72,7 @@ pub fn spawn(tx: Sender<TrayMsg>, status: String) -> Option<TrayHandle> {
             Err(e) => crate::log::error(&format!("icon {size}: {e}")),
         }
     }
-    match (JuleTray { tx, icons, status }).spawn() {
+    match (AppTray { tx, icons, status }).spawn() {
         Ok(h) => Some(h),
         Err(e) => {
             crate::log::error(&format!("no tray icon: {e}"));

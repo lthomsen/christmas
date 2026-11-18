@@ -38,7 +38,7 @@ Only one JuleHygge runs per session (lock file `$XDG_RUNTIME_DIR/julehygge.lock`
 | `--version` | prints the version |
 | `JULE_SETTINGS=path` | uses another settings file, so tests never change the real one |
 | `JULE_DATE=yyyy-MM-dd` | pretends it is another date (weather now; calendar and snowman later) |
-| `JULE_VEJR_TID=HH:MM` | starts the day's weather at that time of day, to watch a change without waiting |
+| `JULE_WEATHER_TIME=HH:MM` | starts the day's weather at that time of day, to watch a change without waiting (the macOS name `JULE_VEJR_TID` works too) |
 | `JULE_DEBUG=1` | debug lines in `$XDG_RUNTIME_DIR/julehygge-debug.log`, including fps, ms per frame and CPU % every 5 s |
 | `JULE_FPS=N` | fixed frame rate (for measurements) |
 | `JULE_SCALE=N` | overrides the desktop scale factor (otherwise `Xft.dpi / 96`) |
@@ -74,3 +74,8 @@ On **Linux Mint** and on **Ubuntu 24.04 or newer (Wayland)**:
 | `src/weather.rs` | changing weather (same random numbers as Windows and macOS) | `Weather.cs` |
 | `src/settings.rs` | `settings.ini` | `Settings.cs` |
 | `src/clock.rs`, `src/log.rs`, `src/rng.rs` | `JULE_DATE`, logs, random numbers | `JuleClock`, `ErrorLog` |
+| `src/text.rs` | all user-facing text (Danish); code and comments are English | strings in the code |
+
+Code, identifiers and comments are English. User-facing text is Danish and lives only in `src/text.rs`. Names
+shared with the other versions keep their spelling: the `JULE_*` environment variables, the `settings.ini` keys
+(`Nisser`, `NisseCount`) and the product name JuleHygge.

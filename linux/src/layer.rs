@@ -1,7 +1,7 @@
 //! One screen's scene: a premultiplied ARGB32 pixel buffer the size of the monitor, and what is drawn on it.
 //! Ported from `src/Layer.cs` (and `macos/Sources/JuleHygge/Overlay.swift`); origin top left, as in both.
 //!
-//! Phase 1: falling snow (dots and crystals). The ground pile, lights, nisser, snowman, plow and Santa follow in
+//! Phase 1: falling snow (dots and crystals). The ground pile, lights, elves, snowman, plow and Santa follow in
 //! later phases (see docs/linux-plan.md).
 //!
 //! The Windows optimisations are kept, because the overlay covers whole 4K screens:

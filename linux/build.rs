@@ -8,5 +8,5 @@ fn main() {
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
         panic!("VERSION must look like 1.2.3, got '{v}'");
     }
-    println!("cargo:rustc-env=JULE_VERSION={v}");
+    println!("cargo:rustc-env=APP_VERSION={v}");
 }
