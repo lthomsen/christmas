@@ -55,7 +55,11 @@ namespace JuleHygge
         bool balloonOpensCalendar;
 
         public float SantaY { get { return SantaY0 + (float)Math.Sin(SantaPhase * 0.9) * 40 * SantaScale; } }
-        public int EffectiveSnowLevel { get { return Time < StormUntil ? 2 : Cfg.SnowLevel; } }
+        // 0 light, 1 normal, 2 storm. Setting 3 ("Skiftende vejr") lets the weather pick (see Weather).
+        public int EffectiveSnowLevel { get { float a = SnowAmount; return a > 1.5f ? 2 : a > 0.5f ? 1 : 0; } }
+        // The same as a number that glides between the levels while the weather changes (0 light ... 2 storm): the
+        // number of flakes follows this, so a change comes on gradually; wind, speed and drifts follow the level.
+        public float SnowAmount { get { return Time < StormUntil ? 2f : Cfg.SnowLevel == 3 ? (float)Weather.Amount() : Cfg.SnowLevel; } }
         public bool SnowOn { get { return Cfg.Snow || Time < StormUntil; } }
 
         // Snowfall slowly drifts between ~60% and ~140% of the chosen amount (two slow waves of about
@@ -708,7 +712,7 @@ namespace JuleHygge
 
             menu.Items.Add(Toggle("Snevejr", () => Cfg.Snow, v => Cfg.Snow = v));
             var level = new ToolStripMenuItem("Snemængde");
-            string[] names = { "Let sne", "Normal", "Snestorm" };
+            string[] names = { "Let sne", "Normal", "Snestorm", "Skiftende vejr" };
             for (int i = 0; i < names.Length; i++)
             {
                 int li = i;

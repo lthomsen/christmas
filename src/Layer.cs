@@ -324,11 +324,15 @@ namespace JuleHygge
         // ------------------------------------------------------------------ sne
         void UpdateSnow(float dt)
         {
-            int[] baseCount = { 110, 260, 650 };
+            float[] baseCount = { 110f, 260f, 650f };
+            // between two levels while the weather changes
+            float amount = Math.Max(0f, Math.Min(2f, c.SnowAmount));
+            int lower = Math.Min(1, (int)amount);
+            float flakesWanted = baseCount[lower] + (baseCount[lower + 1] - baseCount[lower]) * (amount - lower);
             float logicalArea = W * (float)H / (dpiScale * dpiScale);
             // Snow covers the whole screen also in power-save mode (like macOS); power-save only lowers the frame rate.
             // SnowIntensity makes the amount drift slowly between ~60% and ~140% of the chosen level.
-            int target = c.SnowOn ? (int)(baseCount[c.EffectiveSnowLevel] * Math.Min(2f, logicalArea / (1920f * 1080f)) * c.SnowIntensity) : 0;
+            int target = c.SnowOn ? (int)(flakesWanted * Math.Min(2f, logicalArea / (1920f * 1080f)) * c.SnowIntensity) : 0;
             // nye fnug kommer ind fra toppen; overskydende fnug forsvinder først når de lander
             int add = flakes.Count == 0 ? target : Math.Max(1, target / 60);
             for (int i = 0; i < add && flakes.Count < target; i++) flakes.Add(NewFlake(flakes.Count == 0 || c.Time < 1f));

@@ -51,6 +51,11 @@ if let a = args.first(where: { $0.hasPrefix("--opdatering-test=") }) {
     if parts.count == 2 { Updater.test(zip: parts[0], version: parts[1]) }
     exit(0)
 }
+// --vejr-test[=DAYS]: prints how "Skiftende vejr" changes over today and the following days, and quits.
+if let a = args.first(where: { $0.hasPrefix("--vejr-test") }) {
+    Weather.test(days: Int(a.dropFirst(12)) ?? 30)
+    exit(0)
+}
 // --nissedragt-test=DIR,IMAGE: puts the camera's nisse beard and suit on the person in a photo, and quits.
 if let a = args.first(where: { $0.hasPrefix("--nissedragt-test=") }) {
     let parts = a.dropFirst(18).split(separator: ",", maxSplits: 1).map(String.init)
@@ -58,7 +63,7 @@ if let a = args.first(where: { $0.hasPrefix("--nissedragt-test=") }) {
     exit(0)
 }
 let isChild = ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil
-let testFlags = ["--nissehue-test", "--opdatering-test", "--kamera-replay", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
+let testFlags = ["--nissehue-test", "--vejr-test", "--opdatering-test", "--kamera-replay", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
 let wantsSupervisor = !isChild && ProcessInfo.processInfo.environment["JULE_NO_SUPERVISOR"] == nil
     && !args.dropFirst().contains(where: { a in testFlags.contains(where: { a.hasPrefix($0) }) })
 if wantsSupervisor {

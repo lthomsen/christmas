@@ -52,7 +52,11 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private(set) var powerSave = false
 
     var santaY: F { santaY0 + sin(santaPhase * 0.9) * 40 * santaScale }
-    var effectiveSnowLevel: Int { time < stormUntil ? 2 : cfg.snowLevel }
+    /// 0 light, 1 normal, 2 storm. Setting 3 ("Skiftende vejr") lets the weather pick (see Weather).
+    var effectiveSnowLevel: Int { let a = snowAmount; return a > 1.5 ? 2 : a > 0.5 ? 1 : 0 }
+    /// The same as a number that glides between the levels while the weather changes (0 light … 2 storm): the
+    /// number of flakes follows this, so a change comes on gradually; wind, speed and drifts follow the level.
+    var snowAmount: F { time < stormUntil ? 2 : cfg.snowLevel == 3 ? F(Weather.amount()) : F(cfg.snowLevel) }
     var snowOn: Bool { cfg.snow || time < stormUntil }
 
     /// Snowfall slowly drifts between ~60 % and ~140 % of the chosen amount (two slow waves of about
@@ -660,7 +664,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(.separator())
 
         menu.addItem(toggle("Snevejr", { $0.snow }, { $0.snow = $1 }))
-        menu.addItem(choice("Snemængde", ["Let sne", "Normal", "Snestorm"], [0, 1, 2], { $0.snowLevel }, { $0.snowLevel = $1 }))
+        menu.addItem(choice("Snemængde", ["Let sne", "Normal", "Snestorm", "Skiftende vejr"], [0, 1, 2, 3], { $0.snowLevel }, { $0.snowLevel = $1 }))
         menu.addItem(toggle("Sne i bunden af skærmen", { $0.snowGround }, { $0.snowGround = $1 }))
         menu.addItem(toggle("Sne på vinduerne", { $0.windowSnow }, { $0.windowSnow = $1 }))
         snowmanItem = toggle("Snemand", { $0.snowman }, { $0.snowman = $1 })
