@@ -18,12 +18,18 @@ x11rb = { version = "0.13", features = ["randr", "shape", "xfixes", "render", "d
 libc = "0.2"
 # 2D drawing (and PNG output for --snapshot). Links the system's libcairo2.
 cairo-rs = { version = "0.20", features = ["png"] }
+# Text in the calendar window (same gtk-rs-core release as cairo-rs). Links the system's libpango.
+pangocairo = "0.20"
+# Sound output (ALSA; reaches PipeWire and PulseAudio through their ALSA plugins). Links the system's libasound2.
+cpal = "0.15"
 # Tray icon and menu (StatusNotifierItem over D-Bus, pure Rust via zbus).
 ksni = { version = "0.3", features = ["blocking"] }
 # Lock and screen saver state over D-Bus. Already used by ksni (same version and tokio runtime), so it adds no
 # second D-Bus stack.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "time"] }
+# Reading D-Bus signals (a click on a notification) as a stream; already used by ksni.
+futures-util = { version = "0.3", default-features = false }
 # Local date and time of day (JULE_DATE, weather).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 

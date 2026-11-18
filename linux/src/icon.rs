@@ -65,6 +65,16 @@ pub fn argb_be(size: i32) -> Res<Vec<u8>> {
     Ok(out)
 }
 
+/// The icon as straight ARGB values, as `_NET_WM_ICON` wants it.
+pub fn argb_u32(size: i32) -> Res<Vec<u32>> {
+    Ok(argb_be(size)?.as_chunks::<4>().0.iter().map(|c| u32::from_be_bytes(*c)).collect())
+}
+
+/// The icon as straight RGBA bytes, as a notification's `image-data` wants it.
+pub fn rgba(size: i32) -> Res<Vec<u8>> {
+    Ok(argb_be(size)?.as_chunks::<4>().0.iter().flat_map(|c| [c[1], c[2], c[3], c[0]]).collect())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

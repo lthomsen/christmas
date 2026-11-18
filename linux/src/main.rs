@@ -1,6 +1,8 @@
 //! JuleHygge for Linux (Ubuntu and Linux Mint): snow over the desktop, with a snowflake in the panel.
 //! See linux/README.md and docs/linux-plan.md. All user-facing text is Danish.
 
+mod autostart;
+mod calendar;
 mod clock;
 mod controller;
 mod figures;
@@ -10,6 +12,7 @@ mod log;
 mod rng;
 mod session;
 mod settings;
+mod sound;
 mod text;
 mod tray;
 mod weather;
@@ -26,6 +29,24 @@ fn main() {
         if a == "--version" {
             println!("JuleHygge {VERSION}");
             return;
+        } else if let Some(file) = a.strip_prefix("--calendar-snapshot=") {
+            // draws the calendar into a PNG file without opening a window (at JULE_SCALE, default 2)
+            let k = std::env::var("JULE_SCALE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(2.0);
+            if let Err(e) = calendar::render_to_png(&settings::Settings::load(), k, std::path::Path::new(file)) {
+                eprintln!("JuleHygge: {file}: {e}");
+                std::process::exit(1);
+            }
+            return;
+        } else if let Some(dir) = a.strip_prefix("--sound-test=").or_else(|| a.strip_prefix("--lyd-test=")) {
+            // writes the synthesized sounds as WAV files and a summary, without starting the app
+            match sound::write_test_files(std::path::Path::new(dir)) {
+                Ok(()) => println!("sounds written to {dir}"),
+                Err(e) => {
+                    eprintln!("JuleHygge: {dir}: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
         } else if let Some(v) = a.strip_prefix("--snapshot=") {
             // --snapshot=DIR[,SECONDS]: writes each screen's overlay as screenN.png after SECONDS (default 5)
             let (dir, secs) = match v.rsplit_once(',') {
@@ -33,6 +54,13 @@ fn main() {
                 _ => (v, 5.0),
             };
             opts.snapshot = Some((PathBuf::from(dir), secs));
+        } else if a == "--calendar" || a == "--kalender" {
+            opts.calendar = true;
+        } else if let Some(v) = a.strip_prefix("--effect=").or_else(|| a.strip_prefix("--effekt=")) {
+            match v.parse::<i32>() {
+                Ok(n) => opts.effect = Some(n),
+                Err(_) => eprintln!("JuleHygge: {a}: not an effect number (1-5)"),
+            }
         } else if a == "--santa" || a == "--julemand" {
             opts.santa = true;
         } else if a == "--plow" || a == "--sneplov" {

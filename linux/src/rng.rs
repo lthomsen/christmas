@@ -1,4 +1,7 @@
-//! A small random number generator (xorshift64*) for the animation. Not for anything security related.
+//! Random numbers. Not for anything security related.
+//! - `Rng` (xorshift64*) for the animation;
+//! - `NetRandom`, .NET Framework's `System.Random`, for the sound synthesis, which seeds it with fixed numbers on
+//!   Windows: with the same sequence the synthesized sounds come out the same as there.
 
 pub struct Rng(u64);
 
@@ -46,9 +49,88 @@ impl Rng {
     }
 }
 
+/// .NET Framework's `System.Random(seed)` (Knuth's subtractive generator), as in its reference source.
+pub struct NetRandom {
+    seeds: [i32; 56],
+    inext: usize,
+    inextp: usize,
+}
+
+impl NetRandom {
+    const MBIG: i32 = i32::MAX;
+    const MSEED: i32 = 161_803_398;
+
+    pub fn new(seed: i32) -> Self {
+        let mut a = [0i32; 56];
+        let subtraction = if seed == i32::MIN { i32::MAX } else { seed.abs() };
+        let mut mj = Self::MSEED - subtraction;
+        a[55] = mj;
+        let mut mk = 1i32;
+        for i in 1..55 {
+            let ii = (21 * i) % 55;
+            a[ii] = mk;
+            mk = mj - mk;
+            if mk < 0 {
+                mk += Self::MBIG;
+            }
+            mj = a[ii];
+        }
+        for _ in 1..5 {
+            for i in 1..56 {
+                a[i] = a[i].wrapping_sub(a[1 + (i + 30) % 55]);
+                if a[i] < 0 {
+                    a[i] += Self::MBIG;
+                }
+            }
+        }
+        NetRandom { seeds: a, inext: 0, inextp: 21 }
+    }
+
+    fn internal_sample(&mut self) -> i32 {
+        let mut next = self.inext + 1;
+        if next >= 56 {
+            next = 1;
+        }
+        let mut nextp = self.inextp + 1;
+        if nextp >= 56 {
+            nextp = 1;
+        }
+        let mut r = self.seeds[next].wrapping_sub(self.seeds[nextp]);
+        if r == Self::MBIG {
+            r -= 1;
+        }
+        if r < 0 {
+            r += Self::MBIG;
+        }
+        self.seeds[next] = r;
+        self.inext = next;
+        self.inextp = nextp;
+        r
+    }
+
+    /// `Random.NextDouble()`: 0 <= r < 1.
+    pub fn next_double(&mut self) -> f64 {
+        self.internal_sample() as f64 * (1.0 / Self::MBIG as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_random_is_repeatable_and_in_range() {
+        let (mut a, mut b) = (NetRandom::new(42), NetRandom::new(42));
+        let mut sum = 0.0;
+        for _ in 0..100_000 {
+            let x = a.next_double();
+            assert_eq!(x, b.next_double());
+            assert!((0.0..1.0).contains(&x));
+            sum += x;
+        }
+        assert!((sum / 100_000.0 - 0.5).abs() < 0.01);
+        assert_ne!(NetRandom::new(7).next_double(), NetRandom::new(42).next_double());
+    }
 
     #[test]
     fn ranges_stay_inside() {

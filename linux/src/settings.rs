@@ -192,6 +192,30 @@ impl Settings {
         s
     }
 
+    /// Takes over the fields the tray menu changes, leaving what the app itself keeps (opened doors, the
+    /// snowman's progress, dates) as it is. Returns the old values, so the caller can see what changed. The caller
+    /// saves.
+    pub fn take_menu_fields(&mut self, m: &Settings) -> Settings {
+        let old = self.clone();
+        self.snow = m.snow;
+        self.snow_level = m.snow_level;
+        self.snow_ground = m.snow_ground;
+        self.snowman = m.snowman;
+        self.santa = m.santa;
+        self.plow = m.plow;
+        self.sound = m.sound;
+        self.plow_sound = m.plow_sound;
+        self.sound_level = m.sound_level;
+        self.elves = m.elves;
+        self.elf_count = m.elf_count;
+        self.power_save = m.power_save;
+        self.frame_rate = m.frame_rate;
+        self.lights = m.lights;
+        self.all_screens = m.all_screens;
+        self.pause_fullscreen = m.pause_fullscreen;
+        old
+    }
+
     /// Writes a temp file and renames it over the old one, so a crash mid-write never leaves half a file.
     pub fn save(&self) {
         if self.load_failed {
@@ -234,6 +258,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(Settings::parse(&s.to_ini()), s);
+    }
+
+    #[test]
+    fn menu_changes_keep_the_doors() {
+        let mut app = Settings { opened_doors: [1, 2].into_iter().collect(), ..Default::default() };
+        // the menu's copy is older: it has not seen door 2 being opened
+        let menu = Settings { opened_doors: [1].into_iter().collect(), sound: true, ..Default::default() };
+        let old = app.take_menu_fields(&menu);
+        assert!(!old.sound && app.sound);
+        assert_eq!(app.opened_doors.len(), 2);
     }
 
     #[test]

@@ -3,18 +3,19 @@
 A native Rust version of JuleHygge for **Ubuntu 22.04+** and **Linux Mint 21+**. The plan, the design choices and
 the phases are in [docs/linux-plan.md](../docs/linux-plan.md).
 
-> **Status: phase 3 (figures).** Snowflake icon in the panel with *Afslut*, one transparent click-through overlay
-> per monitor, falling snow (dots and crystals, wind, changing weather), and a snow pile on top of the bottom panel
-> (or the screen bottom) with storm drifts. Christmas lights, elves (walking between screens, meeting to swap
-> gifts), the snowman (one step more each day), the snow plow and Santa with his reindeer across neighbouring
-> screens. A fullscreen app pauses its screen; a lock, the screen saver or a switched-off display stops
-> everything; power-save follows the battery. There is no calendar, sound or full menu yet (settings are changed
-> in `settings.ini`).
+> **Status: phase 4 (calendar, effects, sound, menu).** Snowflake icon in the panel with the full menu (same items
+> as on Windows), one transparent click-through overlay per monitor, falling snow (wind, changing weather), a snow
+> pile on top of the bottom panel with storm drifts, Christmas lights, elves (walking between screens, swapping
+> gifts), the snowman (one step more each day), the snow plow and Santa across neighbouring screens. The advent
+> calendar (left click on the snowflake, or the menu) with its 24 doors and their effects (Santa, snowstorm, elf
+> party, star shower), daily notices (today's door, the snowman growing), and synthesized sound (off by default).
+> A fullscreen app pauses its screen and mutes the sound; a lock, the screen saver or a switched-off display stops
+> everything; power-save follows the battery. Snow on windows and self-update follow in phases 5 and 6.
 
 ## Build
 
 ```bash
-sudo apt install build-essential pkg-config libcairo2-dev
+sudo apt install build-essential pkg-config libcairo2-dev libpango1.0-dev libasound2-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh     # Rust, if not installed (stable >= 1.89)
 ./build.sh                                                          # -> build/JuleHygge
 ```
@@ -40,10 +41,14 @@ Only one JuleHygge runs per session (lock file `$XDG_RUNTIME_DIR/julehygge.lock`
 |---|---|
 | `--snapshot=DIR[,SEC]` | after SEC seconds (default 5) writes each screen's overlay over a dark background as `DIR/screenN.png`; also works without a compositor (e.g. Xvfb) |
 | `--version` | prints the version |
+| `--calendar` (`--kalender`) | opens the calendar at start |
+| `--effect=N` (`--effekt=N`) | plays a calendar effect at start: 1 Santa, 2 snowstorm, 3 elf party, 4 star shower, 5 all |
+| `--sound-test=DIR` (`--lyd-test=DIR`) | writes the synthesized sounds as WAV files and `summary.txt` (same names as on Windows) and exits; needs no display |
+| `--calendar-snapshot=FILE` | draws the calendar into a PNG (at `JULE_SCALE`, default 2) and exits, without opening a window |
 | `--santa` (`--julemand`) | sends Santa right away |
 | `--plow[=N]` (`--sneplov[=N]`) | sends the snow plow after N seconds (default 3) |
 | `JULE_SETTINGS=path` | uses another settings file, so tests never change the real one |
-| `JULE_DATE=yyyy-MM-dd` | pretends it is another date (weather now; calendar and snowman later) |
+| `JULE_DATE=yyyy-MM-dd` | pretends it is another date (weather, calendar doors, snowman, notices) |
 | `JULE_WEATHER_TIME=HH:MM` | starts the day's weather at that time of day, to watch a change without waiting (the macOS name `JULE_VEJR_TID` works too) |
 | `JULE_DEBUG=1` | debug lines in `$XDG_RUNTIME_DIR/julehygge-debug.log`, including fps, ms per frame and CPU % every 5 s |
 | `JULE_FPS=N` | fixed frame rate (for measurements) |
@@ -55,7 +60,11 @@ Only one JuleHygge runs per session (lock file `$XDG_RUNTIME_DIR/julehygge.lock`
 Settings: `~/.config/JuleHygge/settings.ini`, same keys as on Windows. Errors: `~/.local/state/JuleHygge/error.log`.
 
 Unit tests (`cargo test`) cover the weather (against values computed with the Windows code), settings, the
-snow layer (no trails left behind) and the icon.
+snow layer and figures (no trails left behind), the snow plow and Santa runs, the calendar's door rules, the
+sounds and the icon.
+
+The sound noise uses .NET's `Random` with the Windows seeds, so `--sound-test` should give the same samples as
+`--lyd-test` on Windows; compare the two `summary.txt` files (this has not been checked against a Windows run yet).
 
 ## Phase 1 checklist (on real desktops)
 
@@ -81,10 +90,13 @@ On **Linux Mint** and on **Ubuntu 24.04 or newer (Wayland)**:
 | `src/layer/*.rs` | the figures on a screen: lights, Santa and sparks, snowman, snow plow, elves; Cairo helpers | `Layer.cs` |
 | `src/figures.rs` | Santa, sparks and the plow run in global coordinates, across screens | `Controller.cs` |
 | `src/x11.rs` | X11: monitors, overlay windows, click-through, MIT-SHM, panels, fullscreen window, DPMS | Win32 parts of `Layer.cs` |
-| `src/session.rs` | lock and screen saver (D-Bus), battery | `SessionSwitch`, `PowerWatcher.cs` |
+| `src/session.rs` | lock and screen saver, notifications and clicks on them (D-Bus), battery | `SessionSwitch`, `PowerWatcher.cs`, balloon tips |
 | `src/tray.rs`, `src/icon.rs` | panel icon and menu; the icon drawn with Cairo | `NotifyIcon`, `build.ps1` |
 | `src/weather.rs` | changing weather (same random numbers as Windows and macOS) | `Weather.cs` |
 | `src/settings.rs` | `settings.ini` | `Settings.cs` |
+| `src/calendar.rs` | the advent calendar: doors, rules, window | `Calendar.cs` |
+| `src/sound.rs` | synthesized sounds and playback (cpal) | `Sound.cs` |
+| `src/autostart.rs` | "Start ved login" (`~/.config/autostart/julehygge.desktop`) | the `Run` registry value |
 | `src/clock.rs`, `src/log.rs`, `src/rng.rs` | `JULE_DATE`, logs, random numbers | `JuleClock`, `ErrorLog` |
 | `src/text.rs` | all user-facing text (Danish); code and comments are English | strings in the code |
 

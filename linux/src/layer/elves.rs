@@ -60,8 +60,7 @@ impl Elf {
 }
 
 impl Layer {
-    /// All elves wave for a while (Santa's party effect, phase 4).
-    #[allow(dead_code)]
+    /// All elves wave for a while (the elf party behind some calendar doors).
     pub fn elf_wave(&mut self, seconds: f32) {
         for e in &mut self.elves {
             e.state = ElfState::Wave;

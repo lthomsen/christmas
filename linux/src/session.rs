@@ -10,13 +10,20 @@
 //! Suspend needs no signal: the process is frozen while the computer sleeps, and the controller's frame-stall
 //! check ends anything on its way when it wakes up. DPMS (display off) is read over X11 in `x11.rs`.
 //!
+//! The same thread shows notifications (`org.freedesktop.Notifications`, the balloon tips of Windows) and listens
+//! for clicks on them: a click on the daily door notice opens the calendar.
+//!
 //! The battery is read from `/sys/class/power_supply`, which is what UPower reads too.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use zbus::names::InterfaceName;
+use zbus::zvariant::Value;
 use zbus::Connection;
 
 const SCREEN_SAVERS: [(&str, &str); 3] = [
@@ -25,10 +32,18 @@ const SCREEN_SAVERS: [(&str, &str); 3] = [
     ("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver"),
 ];
 
-#[derive(Clone, Default)]
+/// A notification to show. `opens_calendar`: clicking it opens the calendar.
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+    pub opens_calendar: bool,
+}
+
 pub struct SessionWatch {
     locked: Arc<AtomicBool>,
     saver: Arc<AtomicBool>,
+    notices: Sender<Notice>,
+    clicks: Receiver<()>,
 }
 
 impl SessionWatch {
@@ -38,12 +53,27 @@ impl SessionWatch {
     pub fn screen_saver(&self) -> bool {
         self.saver.load(Ordering::Relaxed)
     }
+    pub fn notify(&self, title: &str, body: &str, opens_calendar: bool) {
+        crate::log::debug(&format!("notice: {title}: {body}"));
+        let _ = self.notices.send(Notice { title: title.into(), body: body.into(), opens_calendar });
+    }
+    /// True once for each click on a notice that opens the calendar.
+    pub fn calendar_clicked(&self) -> bool {
+        let mut any = false;
+        while self.clicks.try_recv().is_ok() {
+            any = true;
+        }
+        any
+    }
 }
 
-/// Starts the D-Bus thread. Without D-Bus both stay false, and the overlay simply keeps running.
+/// Starts the D-Bus thread. Without D-Bus the flags stay false and notices are dropped; the overlay simply keeps
+/// running.
 pub fn spawn() -> SessionWatch {
-    let watch = SessionWatch::default();
-    let w = watch.clone();
+    let (locked, saver) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (notices, notice_rx) = std::sync::mpsc::channel();
+    let (click_tx, clicks) = std::sync::mpsc::channel();
+    let flags = (locked.clone(), saver.clone());
     let started = std::thread::Builder::new().name("session".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -52,20 +82,97 @@ pub fn spawn() -> SessionWatch {
                 return;
             }
         };
-        let (mut system, mut session) = (None, None);
-        loop {
-            rt.block_on(poll(&w, &mut system, &mut session));
-            std::thread::sleep(Duration::from_secs(1));
-        }
+        rt.block_on(run(flags, notice_rx, click_tx));
     });
     if let Err(e) = started {
         crate::log::error(&format!("session watch: {e}"));
     }
-    watch
+    SessionWatch { locked, saver, notices, clicks }
+}
+
+/// The thread's loop: the lock and screen saver once a second, notices as they come, and clicks on them.
+async fn run(flags: (Arc<AtomicBool>, Arc<AtomicBool>), notices: Receiver<Notice>, clicks: Sender<()>) {
+    let (mut system, mut session) = (None, None);
+    let mut actions: Option<zbus::MessageStream> = None;
+    let mut calendar_notices: Vec<u32> = Vec::new();
+    let mut next_poll = Instant::now();
+    let icon = crate::icon::rgba(48).ok();
+    loop {
+        if Instant::now() >= next_poll {
+            next_poll = Instant::now() + Duration::from_secs(1);
+            poll(&flags, &mut system, &mut session).await;
+            if actions.is_none() {
+                if let Some(c) = session.as_ref() {
+                    actions = action_stream(c).await.ok();
+                }
+            }
+        }
+        loop {
+            match notices.try_recv() {
+                Ok(n) => {
+                    let Some(c) = session.as_ref() else { continue };
+                    match show(c, &n, icon.as_deref()).await {
+                        Ok(id) if n.opens_calendar => calendar_notices.push(id),
+                        Ok(_) => {}
+                        Err(e) => crate::log::error(&format!("notice: {e}")),
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        match actions.as_mut() {
+            Some(stream) => {
+                if let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
+                    if let Ok((id, _key)) = msg.body().deserialize::<(u32, String)>() {
+                        if calendar_notices.contains(&id) {
+                            let _ = clicks.send(());
+                        }
+                    }
+                }
+            }
+            None => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+}
+
+/// Clicks on notifications (`ActionInvoked`), from every app; `run` keeps only its own.
+async fn action_stream(c: &Connection) -> zbus::Result<zbus::MessageStream> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.Notifications")?
+        .member("ActionInvoked")?
+        .build();
+    zbus::MessageStream::for_match_rule(rule, c, None).await
+}
+
+/// Shows a notice with the snowflake icon; returns its id.
+async fn show(c: &Connection, n: &Notice, icon: Option<&[u8]>) -> zbus::Result<u32> {
+    let mut hints: HashMap<&str, Value> = HashMap::new();
+    hints.insert("desktop-entry", Value::from("julehygge"));
+    if let Some(px) = icon {
+        // (width, height, rowstride, has alpha, bits per sample, channels, RGBA bytes)
+        hints.insert("image-data", Value::from((48i32, 48i32, 48 * 4i32, true, 8i32, 4i32, px.to_vec())));
+    }
+    let actions: Vec<&str> = if n.opens_calendar { vec!["default", crate::text::NOTICE_OPEN_CALENDAR] } else { vec![] };
+    let reply = c
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &("JuleHygge", 0u32, "", n.title.as_str(), n.body.as_str(), actions, hints, 6000i32),
+        )
+        .await?;
+    reply.body().deserialize::<u32>()
 }
 
 /// One round of questions. A bus that cannot be reached is tried again on the next round.
-async fn poll(w: &SessionWatch, system: &mut Option<Connection>, session: &mut Option<Connection>) {
+async fn poll(
+    flags: &(Arc<AtomicBool>, Arc<AtomicBool>),
+    system: &mut Option<Connection>,
+    session: &mut Option<Connection>,
+) {
     if system.is_none() {
         *system = Connection::system().await.ok();
     }
@@ -74,7 +181,7 @@ async fn poll(w: &SessionWatch, system: &mut Option<Connection>, session: &mut O
     }
     if let Some(c) = system.as_ref() {
         let locked = locked_hint(c).await.unwrap_or(false);
-        if w.locked.swap(locked, Ordering::Relaxed) != locked {
+        if flags.0.swap(locked, Ordering::Relaxed) != locked {
             crate::log::debug(&format!("session locked: {locked}"));
         }
     }
@@ -86,7 +193,7 @@ async fn poll(w: &SessionWatch, system: &mut Option<Connection>, session: &mut O
                 break;
             }
         }
-        if w.saver.swap(active, Ordering::Relaxed) != active {
+        if flags.1.swap(active, Ordering::Relaxed) != active {
             crate::log::debug(&format!("screen saver active: {active}"));
         }
     }

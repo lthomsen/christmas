@@ -76,6 +76,10 @@ pub struct Figures {
     pub plow: PlowRun,
     plow_at: Option<f64>,
     rng: Rng,
+    /// This trip's speed against the normal (0.9..1.1); his tune plays at the same rate.
+    pub santa_pace: f32,
+    /// A new trip started since the last call to `take_new_trip` (the sound picks a tune for it).
+    new_trip: bool,
 }
 
 /// The screen directly to the left (dir < 0) or right (dir > 0) of screen `i`: edge to edge and overlapping
@@ -109,6 +113,8 @@ impl Figures {
             },
             plow_at: None,
             rng: Rng::new(seed),
+            santa_pace: 1.0,
+            new_trip: false,
         }
     }
 
@@ -163,8 +169,10 @@ impl Figures {
         let pace = 0.9 + self.rng.f() * 0.2;
         let wide = if max_x - min_x > b.w as f32 * 1.5 { 1.6 } else { 1.0 };
         let speed = 230.0 * pace * scale * wide;
+        self.santa_pace = pace;
         crate::log::debug(&format!("santa: dir {dir} from {min_x} to {max_x} at y {y0:.0}"));
         self.santa = Some(Santa { x, y0, dir, speed, phase: 0.0, scale, min_x, max_x });
+        self.new_trip = true;
     }
 
     fn update_santa(&mut self, dt: f32, screens: &[ScreenInfo], enabled: bool) {
@@ -292,6 +300,63 @@ impl Figures {
     }
 
     // ------------------------------------------------------------------ every frame
+    /// True once after each new trip.
+    pub fn take_new_trip(&mut self) -> bool {
+        std::mem::take(&mut self.new_trip)
+    }
+
+    /// The stretch of screens Santa flies over this trip (for panning his sound).
+    pub fn santa_span(&self) -> Option<(f32, f32)> {
+        self.santa.as_ref().map(|s| (s.min_x, s.max_x))
+    }
+
+    /// The row of screens the plow drives this run (for panning its sound).
+    pub fn plow_span(&self) -> (f32, f32) {
+        (self.plow.min_x, self.plow.max_x)
+    }
+
+    // ------------------------------------------------------------------ effects (from the calendar)
+    /// Gold and white stars falling over every screen.
+    pub fn star_shower(&mut self, screens: &[ScreenInfo]) {
+        for sc in screens {
+            let (b, s) = (sc.rect, sc.s);
+            for _ in 0..90 {
+                let r = &mut self.rng;
+                let life = 5.0 + r.f() * 3.0;
+                self.sparks.push(Spark {
+                    x: b.x as f32 + r.f() * b.w as f32,
+                    y: b.y as f32 - r.f() * b.h as f32 * 0.8,
+                    vx: (r.f() - 0.5) * 20.0 * s,
+                    vy: (140.0 + r.f() * 140.0) * s,
+                    life,
+                    max: life,
+                    size: (3.0 + r.f() * 4.0) * s,
+                    gold: r.f() < 0.8,
+                    star: true,
+                });
+            }
+        }
+    }
+
+    /// Sparks rising around the snowman when it grew today (at `pos`, global coordinates, on a screen of scale s).
+    pub fn snowman_celebrate(&mut self, (x, y): (f32, f32), s: f32) {
+        for _ in 0..70 {
+            let r = &mut self.rng;
+            let life = 1.5 + r.f() * 1.5;
+            self.sparks.push(Spark {
+                x: x + (r.f() - 0.5) * 90.0 * s,
+                y: y - r.f() * 120.0 * s,
+                vx: (r.f() - 0.5) * 60.0 * s,
+                vy: -(20.0 + r.f() * 60.0) * s,
+                life,
+                max: life,
+                size: (2.0 + r.f() * 3.0) * s,
+                gold: r.f() < 0.6,
+                star: false,
+            });
+        }
+    }
+
     pub fn update(&mut self, dt: f32, now: f64, screens: &[ScreenInfo], santa: bool, plow: bool) {
         if self.plow_at.is_some_and(|at| now >= at) {
             self.plow_at = None;

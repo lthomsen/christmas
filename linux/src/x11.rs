@@ -11,6 +11,9 @@
 //! segment, and a frame sends one tiny `ShmPutImage` per changed rectangle. Plain `PutImage` (every pixel copied
 //! through the socket) is the fallback, e.g. for a remote display; in a snowstorm it cost several times more.
 //!
+//! The calendar is an ordinary managed window (`create_app_window`): drawn with Cairo into memory and sent with
+//! `PutImage` in the root window's visual, on the same connection, so its events arrive in the main loop.
+//!
 //! It also reads what the snow needs to know about the desktop: where each monitor's bottom panel starts, whether
 //! the active window is fullscreen, and whether the display is switched off (DPMS).
 
@@ -21,8 +24,8 @@ use x11rb::protocol::shape;
 use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask,
-    ImageFormat, ImageOrder, PropMode, StackMode, VisualClass, Window, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+    CreateWindowAux, EventMask, ImageFormat, ImageOrder, PropMode, StackMode, VisualClass, Window, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -104,6 +107,11 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST,
         _NET_CURRENT_DESKTOP,
         _GTK_FRAME_EXTENTS,
+        _NET_WM_ICON,
+        _NET_WM_PID,
+        _NET_WM_WINDOW_TYPE_NORMAL,
+        WM_PROTOCOLS,
+        WM_DELETE_WINDOW,
         UTF8_STRING,
     }
 }
@@ -183,6 +191,27 @@ pub struct Display {
     /// Xft.dpi / 96 (or JULE_SCALE), at least 1.
     pub dpi_scale: f32,
     scratch: Vec<u8>,
+    /// The root window's depth and visual, for ordinary windows (the calendar); only usable when the server
+    /// stores that depth as 32 bits per pixel, as every current server does for depth 24.
+    root_depth: u8,
+    root_visual: u32,
+    root_32bpp: bool,
+    /// Keycodes that produce Escape (closes the calendar), and the hand and arrow cursors.
+    escape_keys: Vec<u8>,
+    cursors: Option<(u32, u32)>,
+}
+
+/// An ordinary window (the calendar) and the graphics context to draw into it.
+pub struct AppWindow {
+    pub win: Window,
+    gc: u32,
+}
+
+impl AppWindow {
+    /// No window: for drawing the calendar into a file (`--calendar-snapshot`).
+    pub fn none() -> AppWindow {
+        AppWindow { win: x11rb::NONE, gc: x11rb::NONE }
+    }
 }
 
 impl Display {
@@ -200,6 +229,13 @@ impl Display {
             (screen.root, screen.width_in_pixels as i32, screen.height_in_pixels as i32, visual)
         };
         let lsb_first = conn.setup().image_byte_order == ImageOrder::LSB_FIRST;
+        let (root_depth, root_visual) = {
+            let screen = &conn.setup().roots[screen_num];
+            (screen.root_depth, screen.root_visual)
+        };
+        let root_32bpp = conn.setup().pixmap_formats.iter().any(|f| f.depth == root_depth && f.bits_per_pixel == 32);
+        let escape_keys = escape_keycodes(&conn);
+        let cursors = hand_and_arrow_cursors(&conn);
 
         let atoms = Atoms::new(&conn)?.reply()?;
         let cm_atom = conn.intern_atom(false, format!("_NET_WM_CM_S{screen_num}").as_bytes())?.reply()?.atom;
@@ -252,6 +288,11 @@ impl Display {
             use_shm,
             dpi_scale,
             scratch: Vec::new(),
+            root_depth,
+            root_visual,
+            root_32bpp,
+            escape_keys,
+            cursors,
         })
     }
 
@@ -423,6 +464,9 @@ impl Display {
     /// With shared memory each rectangle is one small request; otherwise it is split into bands of rows that fit
     /// in one request. After shared-memory puts, call `sync` before the buffer is drawn on again.
     pub fn put(&mut self, w: &OverlayWindow, pixels: &[u32], stride: usize, height: i32, rects: &[Rect]) -> Res<()> {
+        if w.shm_seg.is_none() {
+            return self.put_socket(w.win, w.gc, 32, pixels, stride, rects);
+        }
         if let Some(seg) = w.shm_seg {
             for r in rects.iter().filter(|r| !r.is_empty()) {
                 self.conn.shm_put_image(
@@ -443,8 +487,20 @@ impl Display {
                     0,
                 )?;
             }
-            return Ok(());
         }
+        Ok(())
+    }
+
+    /// Sends rectangles of a 32-bit-per-pixel buffer through the socket, in bands of rows that fit in a request.
+    fn put_socket(
+        &mut self,
+        win: Window,
+        gc: u32,
+        depth: u8,
+        pixels: &[u32],
+        stride: usize,
+        rects: &[Rect],
+    ) -> Res<()> {
         for r in rects {
             if r.is_empty() {
                 continue;
@@ -472,14 +528,14 @@ impl Display {
                 }
                 self.conn.put_image(
                     ImageFormat::Z_PIXMAP,
-                    w.win,
-                    w.gc,
+                    win,
+                    gc,
                     r.w as u16,
                     rows as u16,
                     r.x as i16,
                     y as i16,
                     0,
-                    32,
+                    depth,
                     &self.scratch,
                 )?;
                 y += rows;
@@ -498,6 +554,132 @@ impl Display {
     pub fn sync(&self) -> Res<()> {
         self.conn.get_input_focus()?.reply()?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------ ordinary windows (the calendar)
+    /// Creates and shows a fixed-size, decorated window of `w` x `h` pixels, centred on `on` (global coordinates),
+    /// with a title, the app icon (`icon`: ARGB values of a `icon_size` square) and a close button that sends
+    /// `WM_DELETE_WINDOW` instead of killing the connection.
+    pub fn create_app_window(&self, title: &str, w: i32, h: i32, on: Rect, icon: &[(i32, Vec<u32>)]) -> Res<AppWindow> {
+        if !self.root_32bpp {
+            return Err("the X server does not store the root depth as 32 bits per pixel".into());
+        }
+        let a = &self.atoms;
+        let win = self.conn.generate_id()?;
+        let (x, y) = (on.x + (on.w - w) / 2, on.y + (on.h - h) / 2);
+        let events = EventMask::EXPOSURE
+            | EventMask::BUTTON_PRESS
+            | EventMask::POINTER_MOTION
+            | EventMask::KEY_PRESS
+            | EventMask::STRUCTURE_NOTIFY;
+        let aux = CreateWindowAux::new().background_pixel(0x0f2d1e).event_mask(events);
+        self.conn.create_window(
+            self.root_depth,
+            win,
+            self.root,
+            x as i16,
+            y as i16,
+            w as u16,
+            h as u16,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            self.root_visual,
+            &aux,
+        )?;
+        self.conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
+        self.conn.change_property8(PropMode::REPLACE, win, a._NET_WM_NAME, a.UTF8_STRING, title.as_bytes())?;
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            win,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"julehygge\0JuleHygge\0",
+        )?;
+        self.conn.change_property32(PropMode::REPLACE, win, a.WM_PROTOCOLS, AtomEnum::ATOM, &[a.WM_DELETE_WINDOW])?;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            win,
+            a._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &[a._NET_WM_WINDOW_TYPE_NORMAL],
+        )?;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            win,
+            a._NET_WM_PID,
+            AtomEnum::CARDINAL,
+            &[std::process::id()],
+        )?;
+        let mut icon_data = Vec::new();
+        for (size, argb) in icon {
+            icon_data.extend_from_slice(&[*size as u32, *size as u32]);
+            icon_data.extend_from_slice(argb);
+        }
+        self.conn.change_property32(PropMode::REPLACE, win, a._NET_WM_ICON, AtomEnum::CARDINAL, &icon_data)?;
+        // fixed size at a chosen position (WM_NORMAL_HINTS: flags USPosition|PPosition|PMinSize|PMaxSize)
+        let mut hints = [0u32; 18];
+        hints[0] = 1 | 4 | 16 | 32;
+        hints[1] = x as u32;
+        hints[2] = y as u32;
+        hints[5] = w as u32;
+        hints[6] = h as u32;
+        hints[7] = w as u32;
+        hints[8] = h as u32;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            win,
+            AtomEnum::WM_NORMAL_HINTS,
+            AtomEnum::WM_SIZE_HINTS,
+            &hints,
+        )?;
+        let gc = self.conn.generate_id()?;
+        self.conn.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
+        self.conn.map_window(win)?;
+        self.conn.flush()?;
+        Ok(AppWindow { win, gc })
+    }
+
+    pub fn destroy_app_window(&self, w: &AppWindow) {
+        let _ = self.conn.free_gc(w.gc);
+        let _ = self.conn.destroy_window(w.win);
+        let _ = self.conn.flush();
+    }
+
+    /// Sends rectangles of an opaque 32-bit buffer (`stride` pixels per row) to an ordinary window.
+    pub fn put_app(&mut self, w: &AppWindow, pixels: &[u32], stride: usize, rects: &[Rect]) -> Res<()> {
+        self.put_socket(w.win, w.gc, self.root_depth, pixels, stride, rects)
+    }
+
+    /// Brings the window to the front and gives it focus (asking the window manager, which may refuse focus
+    /// stealing but then usually flashes it in the panel).
+    pub fn activate(&self, w: &AppWindow) {
+        let _ = self.conn.map_window(w.win);
+        let ev = x11rb::protocol::xproto::ClientMessageEvent::new(
+            32,
+            w.win,
+            self.atoms._NET_ACTIVE_WINDOW,
+            [1u32, x11rb::CURRENT_TIME, 0, 0, 0],
+        );
+        let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = self.conn.send_event(false, self.root, mask, ev);
+        let _ = self.conn.flush();
+    }
+
+    /// The hand cursor over something clickable, the normal arrow elsewhere.
+    pub fn set_hand_cursor(&self, w: &AppWindow, hand: bool) {
+        if let Some((hand_c, arrow)) = self.cursors {
+            let aux = ChangeWindowAttributesAux::new().cursor(if hand { hand_c } else { arrow });
+            let _ = self.conn.change_window_attributes(w.win, &aux);
+        }
+    }
+
+    /// True for a `WM_DELETE_WINDOW` message (the close button).
+    pub fn is_close_request(&self, e: &x11rb::protocol::xproto::ClientMessageEvent) -> bool {
+        e.type_ == self.atoms.WM_PROTOCOLS && e.data.as_data32()[0] == self.atoms.WM_DELETE_WINDOW
+    }
+
+    pub fn is_escape(&self, keycode: u8) -> bool {
+        self.escape_keys.contains(&keycode)
     }
 
     // ------------------------------------------------------------------ the desktop
@@ -627,6 +809,39 @@ impl Display {
         }
         Ok(v)
     }
+}
+
+/// The keycodes that produce the Escape keysym in the current keyboard map.
+fn escape_keycodes(conn: &RustConnection) -> Vec<u8> {
+    const XK_ESCAPE: u32 = 0xff1b;
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let Some(map) = conn.get_keyboard_mapping(min, max - min + 1).ok().and_then(|c| c.reply().ok()) else {
+        return vec![9]; // the usual keycode for Escape
+    };
+    let per = map.keysyms_per_keycode.max(1) as usize;
+    map.keysyms
+        .chunks(per)
+        .enumerate()
+        .filter(|(_, syms)| syms.contains(&XK_ESCAPE))
+        .map(|(i, _)| min + i as u8)
+        .collect()
+}
+
+/// The hand and arrow cursors from the standard cursor font.
+fn hand_and_arrow_cursors(conn: &RustConnection) -> Option<(u32, u32)> {
+    const XC_HAND2: u16 = 60;
+    const XC_LEFT_PTR: u16 = 68;
+    let font = conn.generate_id().ok()?;
+    conn.open_font(font, b"cursor").ok()?;
+    let make = |glyph: u16| -> Option<u32> {
+        let c = conn.generate_id().ok()?;
+        conn.create_glyph_cursor(c, font, font, glyph, glyph + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff).ok()?;
+        Some(c)
+    };
+    let cursors = (make(XC_HAND2)?, make(XC_LEFT_PTR)?);
+    let _ = conn.close_font(font);
+    Some(cursors)
 }
 
 /// The top of a panel along the bottom of monitor `m` (local y), from per-monitor work areas: the work area that

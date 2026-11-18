@@ -1,5 +1,6 @@
 //! The main loop: one overlay per monitor, the shared scene state (time, wind, weather), the frame timer, the
-//! tray, and the test aids. Corresponds to `src/Controller.cs`.
+//! tray menu, the calendar window and its effects, the daily notices, the sound, and the test aids. Corresponds
+//! to `src/Controller.cs`.
 //!
 //! Everything stops while nobody can see it: the session is locked, the screen saver runs, or the display is
 //! off. Each reason is tracked on its own, so e.g. the screen saver ending in front of the lock screen does not
@@ -9,13 +10,17 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
+use chrono::{Datelike, NaiveDate};
 use x11rb::protocol::Event;
 
+use crate::calendar::{Calendar, CalendarAction};
 use crate::figures::{Figures, ScreenInfo};
 use crate::layer::{Layer, PixelStore, Present, SceneState, SNOWMAN_MAX_STAGE};
 use crate::rng::Rng;
 use crate::session::SessionWatch;
 use crate::settings::Settings;
+use crate::sound::{AudioHub, Voice};
+use crate::text;
 use crate::tray::{TrayHandle, TrayMsg};
 use crate::weather::Weather;
 use crate::x11::{Display, Monitor, OverlayWindow, Rect, Res};
@@ -28,6 +33,24 @@ pub struct Options {
     pub santa: bool,
     /// `--plow[=N]`: send the snow plow after N seconds (default 3).
     pub plow_after: Option<f32>,
+    /// `--calendar`: open the calendar at start.
+    pub calendar: bool,
+    /// `--effect=N`: play a calendar effect at start (1 Santa, 2 storm, 3 elf party, 4 star shower, 5 all).
+    pub effect: Option<i32>,
+}
+
+/// The sounds, made once and played when their figure is on its way.
+struct Sounds {
+    hub: AudioHub,
+    jingles: Vec<Voice>,
+    plow_engine: Voice,
+    plow_scrape: Voice,
+    plow_horn: Voice,
+    /// This trip's tune.
+    jingle: usize,
+    horned_this_run: bool,
+    /// Where Santa was last (x, scale, span), so his tune can fade out after he has gone.
+    santa_last: (f32, f32, f32, f32),
 }
 
 struct Screen {
@@ -52,6 +75,13 @@ pub struct Controller {
     /// The snowman's stage today, 1..=12 (checked every 30 seconds, for the day changing at midnight).
     snowman_stage: i32,
     day_timer: f32,
+    last_day: NaiveDate,
+    calendar: Option<Calendar>,
+    sounds: Sounds,
+    /// A calendar storm lasts until this time.
+    storm_until: f64,
+    /// The snowman grew today: celebrate with sparks at this time.
+    celebrate_at: Option<f64>,
 
     /// Seconds since start, as a double (see `SceneState::time`).
     time: f64,
@@ -91,7 +121,15 @@ impl Controller {
         let mut rng = Rng::from_time();
         let can_overlay = display.can_overlay();
         let (tx, tray_rx) = channel();
-        let tray = crate::tray::spawn(tx, status_text(can_overlay));
+        let today = crate::clock::today();
+        let tray = crate::tray::spawn(
+            tx,
+            status_text(can_overlay),
+            cfg.clone(),
+            snowman_stage_for(&cfg, today),
+            countdown_text(today),
+            crate::autostart::enabled(),
+        );
         let session = crate::session::spawn();
         let snow_phase_a = rng.f64() * 2.0 * std::f64::consts::PI;
         let snow_phase_b = rng.f64() * 2.0 * std::f64::consts::PI;
@@ -108,7 +146,12 @@ impl Controller {
             snapshot: opts.snapshot,
             figures: Figures::new(figures_seed),
             snowman_stage: 1,
-            day_timer: 0.0,
+            day_timer: 30.0,
+            last_day: today,
+            calendar: None,
+            sounds: Sounds::new(),
+            storm_until: -1.0,
+            celebrate_at: None,
             time: 0.0,
             wind: 0.0,
             wind_target: 0.0,
@@ -129,7 +172,8 @@ impl Controller {
             rebuild_in: None,
         };
         c.update_power_save();
-        c.update_snowman_stage();
+        c.update_daily(true);
+        c.warm_sounds();
         c.build_screens();
         if opts.santa {
             let screens = c.screen_infos();
@@ -137,6 +181,12 @@ impl Controller {
         }
         if let Some(secs) = opts.plow_after {
             c.figures.send_plow_after(0.0, secs);
+        }
+        if opts.calendar {
+            c.show_calendar();
+        }
+        if let Some(n) = opts.effect {
+            c.trigger_effect(n);
         }
         Ok(c)
     }
@@ -220,18 +270,212 @@ impl Controller {
             .collect()
     }
 
-    /// One more step each day from the first start, up to the finished snowman.
-    fn update_snowman_stage(&mut self) {
+    // ------------------------------------------------------------------ daily events
+    /// At start and when the day changes: a new calendar year, the snowman's step today, and a notice for the
+    /// snowman growing or today's door (`UpdateDaily` on Windows).
+    fn update_daily(&mut self, startup: bool) {
         let today = crate::clock::today();
-        let days = self.cfg.first_run.map_or(0, |f| (today - f).num_days());
-        let stage = (days + 1).clamp(1, SNOWMAN_MAX_STAGE as i64) as i32;
-        if stage != self.snowman_stage {
-            crate::log::debug(&format!("snowman stage {stage}"));
-            self.snowman_stage = stage;
+        self.last_day = today;
+        crate::calendar::sync_year(&mut self.cfg, today);
+        self.snowman_stage = snowman_stage_for(&self.cfg, today);
+        crate::log::debug(&format!("day {today}: snowman stage {}", self.snowman_stage));
+
+        let mut notice: Option<(&str, String, bool)> = None;
+        if self.snowman_stage > self.cfg.snowman_seen_stage {
+            if self.cfg.snowman_seen_stage > 0 && self.cfg.snowman {
+                let step = text::SNOWMAN_STEPS[self.snowman_stage as usize - 1];
+                notice = Some((text::NOTICE_SNOWMAN_TITLE, text::notice_snowman(step), false));
+                self.celebrate_at = Some(self.time + 2.0);
+            }
+            self.cfg.snowman_seen_stage = self.snowman_stage;
+            self.cfg.save();
+        }
+        let day = today.day();
+        if today.month() == 12
+            && day <= 24
+            && !self.cfg.opened_doors.contains(&(day as i32))
+            && self.cfg.last_door_notice != Some(today)
+        {
+            notice = Some((text::NOTICE_DOOR_TITLE, text::notice_door(day), true));
+            self.cfg.last_door_notice = Some(today);
+            self.cfg.save();
+        }
+        if notice.is_none() && startup {
+            notice = Some((text::NOTICE_STARTED_TITLE, text::NOTICE_STARTED.into(), false));
+        }
+        if let Some((title, body, opens_calendar)) = notice {
+            self.session.notify(title, &body, opens_calendar);
+        }
+        self.update_tray();
+    }
+
+    /// Shows the current settings, the snowman's stage and the countdown in the tray menu.
+    fn update_tray(&self) {
+        let Some(t) = &self.tray else { return };
+        let (cfg, stage, countdown) = (self.cfg.clone(), self.snowman_stage, countdown_text(self.last_day));
+        let autostart = crate::autostart::enabled();
+        let _ = t.update(move |tray: &mut crate::tray::AppTray| {
+            tray.cfg = cfg;
+            tray.snowman_stage = stage;
+            tray.countdown = countdown;
+            tray.autostart = autostart;
+        });
+    }
+
+    fn handle_tray(&mut self, msg: TrayMsg) {
+        match msg {
+            TrayMsg::Quit => {}
+            TrayMsg::Calendar => self.show_calendar(),
+            TrayMsg::Santa => {
+                let screens = self.screen_infos();
+                self.figures.launch_santa(&screens);
+            }
+            TrayMsg::Plow => {
+                let screens = self.screen_infos();
+                self.figures.send_plow(&screens);
+            }
+            TrayMsg::Settings(m) => {
+                let old = self.cfg.take_menu_fields(&m);
+                self.cfg.save();
+                crate::log::debug("settings changed in the menu");
+                if old.all_screens != self.cfg.all_screens {
+                    self.build_screens();
+                }
+                if old.power_save != self.cfg.power_save {
+                    self.update_power_save();
+                }
+                if (!old.sound && self.cfg.sound) || (!old.plow_sound && self.cfg.plow_sound) {
+                    self.warm_sounds();
+                }
+                self.update_tray();
+            }
+            TrayMsg::Autostart(on) => {
+                crate::autostart::set(on);
+                self.update_tray();
+            }
         }
     }
 
+    // ------------------------------------------------------------------ calendar and effects
+    /// Opens the calendar, or brings it to the front if it is open.
+    fn show_calendar(&mut self) {
+        if let Some(c) = &self.calendar {
+            c.raise(&self.display);
+            return;
+        }
+        let on = self.monitors.iter().find(|m| m.primary).or(self.monitors.first()).map(|m| m.rect);
+        match Calendar::open(&self.display, &self.cfg, on.unwrap_or(Rect::new(0, 0, 1920, 1080))) {
+            Ok(c) => self.calendar = Some(c),
+            Err(e) => crate::log::error(&format!("calendar: {e}")),
+        }
+    }
+
+    /// What a calendar door does: 1 Santa, 2 a 25-second snowstorm, 3 the elves wave, 4 a star shower, 5 all but
+    /// the storm.
+    fn trigger_effect(&mut self, effect: i32) {
+        crate::log::debug(&format!("effect {effect}"));
+        let screens = self.screen_infos();
+        match effect {
+            1 => self.figures.launch_santa(&screens),
+            2 => self.storm_until = self.time + 25.0,
+            3 => self.elf_party(),
+            4 => self.figures.star_shower(&screens),
+            5 => {
+                self.figures.launch_santa(&screens);
+                self.figures.star_shower(&screens);
+                self.elf_party();
+            }
+            _ => {}
+        }
+    }
+
+    fn elf_party(&mut self) {
+        for s in &mut self.screens {
+            s.layer.elf_wave(6.0);
+        }
+    }
+
+    // ------------------------------------------------------------------ sound
+    /// Synthesizes the switched-on sounds in the background ahead of time, so they are ready when needed.
+    fn warm_sounds(&mut self) {
+        let s = &self.sounds;
+        if self.cfg.sound {
+            for j in &s.jingles {
+                s.hub.warm(*j);
+            }
+        }
+        if self.cfg.plow_sound {
+            for v in [s.plow_engine, s.plow_scrape, s.plow_horn] {
+                s.hub.warm(v);
+            }
+        }
+    }
+
+    /// Pans each sound with what makes it (Santa, the plow) across all screens and fades it at the edges. A
+    /// fullscreen app that pauses the snow mutes it too.
+    fn update_sound(&mut self, dt: f32) {
+        let volume = [0.15, 0.35, 0.6][self.cfg.sound_level.clamp(0, 2) as usize];
+        let muted = self.cfg.pause_fullscreen && self.fullscreen.is_some();
+        let s = &mut self.sounds;
+        if self.figures.take_new_trip() {
+            // each trip picks one of the tunes, played at the trip's pace
+            s.jingle = self.rng.range(0, s.jingles.len() as i32) as usize;
+            s.hub.set_rate(s.jingles[s.jingle], self.figures.santa_pace);
+        }
+        if let (Some(santa), Some((min, max))) = (&self.figures.santa, self.figures.santa_span()) {
+            s.santa_last = (santa.x, santa.scale, min, max);
+        }
+        {
+            let (x, scale, min, max) = s.santa_last;
+            let margin = 330.0 * scale;
+            let presence = ((x - (min - margin)).min((max + margin) - x) / margin).clamp(0.0, 1.0);
+            let pan = (x - min) / (max - min).max(1.0) * 2.0 - 1.0;
+            let on = self.figures.santa.is_some() && self.cfg.sound && !muted;
+            for i in 0..s.jingles.len() {
+                let v = s.jingles[i];
+                if (self.cfg.sound && i == s.jingle) || s.hub.playing(v) {
+                    let level = if on && i == s.jingle { presence * volume } else { 0.0 };
+                    s.hub.update(v, level, pan, dt);
+                }
+            }
+        }
+        let plow = &self.figures.plow;
+        if self.cfg.plow_sound || s.hub.playing(s.plow_engine) || s.hub.playing(s.plow_scrape) {
+            let (min, max) = self.figures.plow_span();
+            let margin = 300.0;
+            let presence = ((plow.gx - (min - margin)).min((max + margin) - plow.gx) / margin).clamp(0.0, 1.0);
+            let pan = (plow.gx - min) / (max - min).max(1.0) * 2.0 - 1.0;
+            let on = plow.active && self.cfg.plow_sound && !muted;
+            s.hub.update(s.plow_engine, if on { presence * volume * 0.8 } else { 0.0 }, pan, dt);
+            // scraping gets louder with the amount of snow in front of the blade
+            let load = (plow.pushed / 2000.0).sqrt().min(1.0);
+            s.hub.update(s.plow_scrape, if on { presence * volume * (0.15 + 0.85 * load) } else { 0.0 }, pan, dt);
+            if on && !s.horned_this_run && presence > 0.6 {
+                s.horned_this_run = true;
+                s.hub.play_once(s.plow_horn, volume, pan);
+            }
+        }
+        if !plow.active {
+            s.horned_this_run = false;
+        }
+        s.hub.idle_check(self.time);
+    }
+
     fn handle_event(&mut self, e: Event) {
+        if let Some(cal) = self.calendar.as_mut() {
+            if event_window(&e) == Some(cal.window()) {
+                match cal.handle(&mut self.display, &e, &mut self.cfg) {
+                    CalendarAction::Closed => {
+                        if let Some(c) = self.calendar.take() {
+                            c.close(&self.display);
+                        }
+                    }
+                    CalendarAction::Effect(n) => self.trigger_effect(n),
+                    CalendarAction::None => {}
+                }
+                return;
+            }
+        }
         match e {
             Event::Expose(x) => {
                 for s in &mut self.screens {
@@ -251,7 +495,9 @@ impl Controller {
     // ------------------------------------------------------------------ scene state
     /// 0 light ... 2 storm, gliding. Setting 3 (changing weather) lets the weather choose.
     fn snow_amount(&mut self) -> f32 {
-        if self.cfg.snow_level == 3 {
+        if self.time < self.storm_until {
+            2.0
+        } else if self.cfg.snow_level == 3 {
             self.weather.amount() as f32
         } else {
             self.cfg.snow_level as f32
@@ -260,6 +506,9 @@ impl Controller {
 
     /// Snowfall drifts between ~60% and ~140% of the chosen amount (two slow waves of about 3 and 7 minutes).
     fn snow_intensity(&self) -> f32 {
+        if self.time < self.storm_until {
+            return 1.0;
+        }
         let t = self.time;
         let tau = 2.0 * std::f64::consts::PI;
         (1.0 + 0.25 * (t * tau / 190.0 + self.snow_phase_a).sin() + 0.15 * (t * tau / 430.0 + self.snow_phase_b).sin())
@@ -331,6 +580,7 @@ impl Controller {
     /// display off) or frames stalled (e.g. after suspend): otherwise they stay "on the way" while nothing moves.
     fn finish_runs(&mut self) {
         self.figures.finish_runs();
+        self.sounds.hub.stop_all();
     }
 
     /// The calm scene runs at the chosen frame rate (power-save caps it at 12); only fast things get more frames.
@@ -361,14 +611,15 @@ impl Controller {
             for e in self.display.poll_events()? {
                 self.handle_event(e);
             }
-            #[allow(clippy::never_loop)] // Quit is the only tray message until the full menu arrives
             while let Ok(msg) = self.tray_rx.try_recv() {
-                match msg {
-                    TrayMsg::Quit => {
-                        self.shutdown();
-                        return Ok(());
-                    }
+                if let TrayMsg::Quit = msg {
+                    self.shutdown();
+                    return Ok(());
                 }
+                self.handle_tray(msg);
+            }
+            if self.session.calendar_clicked() {
+                self.show_calendar();
             }
 
             if self.check_asleep() {
@@ -408,7 +659,7 @@ impl Controller {
                 wind: self.wind,
                 snow_amount: amount,
                 snow_level: level,
-                snow_on: self.cfg.snow,
+                snow_on: self.cfg.snow || self.time < self.storm_until,
                 snow_intensity: self.snow_intensity(),
                 snow_ground: self.cfg.snow_ground,
                 fullscreen: self.fullscreen,
@@ -425,6 +676,10 @@ impl Controller {
             let busy = Instant::now();
             frame_all(&mut self.display, &mut self.screens, dt, &st);
             self.after_frame();
+            if let Some(cal) = self.calendar.as_mut() {
+                cal.tick(&mut self.display, dt, &self.cfg);
+            }
+            self.update_sound(dt);
             self.display.flush()?;
             stats.frame(busy.elapsed(), self.desired_fps(), self.screens.iter().map(|s| s.layer.flake_count()).sum());
 
@@ -481,7 +736,19 @@ impl Controller {
         self.day_timer -= dt;
         if self.day_timer <= 0.0 {
             self.day_timer = 30.0;
-            self.update_snowman_stage();
+            if crate::clock::today() != self.last_day {
+                self.update_daily(false);
+            }
+        }
+        if self.celebrate_at.is_some_and(|t| self.time >= t) {
+            self.celebrate_at = None;
+            if self.cfg.snowman {
+                if let Some(s) = self.screens.iter().find(|s| s.layer.primary) {
+                    if let Some(pos) = s.layer.snowman_pos() {
+                        self.figures.snowman_celebrate(pos, s.layer.scale());
+                    }
+                }
+            }
         }
         self.desktop_timer -= dt;
         if self.desktop_timer <= 0.0 {
@@ -530,6 +797,10 @@ impl Controller {
     }
 
     fn shutdown(&mut self) {
+        self.sounds.hub.stop_all();
+        if let Some(c) = self.calendar.take() {
+            c.close(&self.display);
+        }
         for s in self.screens.drain(..) {
             if let Some(w) = &s.window {
                 self.display.destroy_overlay(w);
@@ -584,6 +855,60 @@ fn frame_all(display: &mut Display, screens: &mut [Screen], dt: f32, st: &SceneS
             crate::log::error(&format!("present: {e}"));
         }
     }
+}
+
+impl Sounds {
+    fn new() -> Sounds {
+        let mut hub = AudioHub::new();
+        let jingles = (0..crate::sound::tunes().len())
+            .map(|i| hub.create_voice(move || crate::sound::jingle(&crate::sound::tunes()[i]), true))
+            .collect();
+        let plow_engine = hub.create_voice(crate::sound::plow_engine, true);
+        let plow_scrape = hub.create_voice(crate::sound::plow_scrape, true);
+        let plow_horn = hub.create_voice(crate::sound::plow_horn, false);
+        Sounds {
+            hub,
+            jingles,
+            plow_engine,
+            plow_scrape,
+            plow_horn,
+            jingle: 0,
+            horned_this_run: false,
+            santa_last: (0.0, 1.0, 0.0, 1.0),
+        }
+    }
+}
+
+/// The snowman gets one more step each day from the first start, up to the finished snowman.
+fn snowman_stage_for(cfg: &Settings, today: NaiveDate) -> i32 {
+    let days = cfg.first_run.map_or(0, |f| (today - f).num_days());
+    (days + 1).clamp(1, SNOWMAN_MAX_STAGE as i64) as i32
+}
+
+/// "★ 12 dage til juleaften ★" in the menu.
+fn countdown_text(today: NaiveDate) -> String {
+    let eve = |y| NaiveDate::from_ymd_opt(y, 12, 24).unwrap_or(today);
+    let mut e = eve(today.year());
+    if today > e {
+        e = eve(today.year() + 1);
+    }
+    text::countdown((e - today).num_days())
+}
+
+/// The window an event is about, for routing it to the calendar.
+fn event_window(e: &Event) -> Option<u32> {
+    Some(match e {
+        Event::Expose(x) => x.window,
+        Event::ButtonPress(x) => x.event,
+        Event::MotionNotify(x) => x.event,
+        Event::KeyPress(x) => x.event,
+        Event::ClientMessage(x) => x.window,
+        Event::DestroyNotify(x) => x.window,
+        Event::ConfigureNotify(x) => x.window,
+        Event::MapNotify(x) => x.window,
+        Event::UnmapNotify(x) => x.window,
+        _ => return None,
+    })
 }
 
 fn status_text(can_overlay: bool) -> String {

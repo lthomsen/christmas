@@ -19,7 +19,7 @@ use std::f32::consts::{FRAC_PI_3, TAU};
 
 use cairo::{Context, Format, ImageSurface};
 
-mod draw;
+pub(crate) mod draw;
 mod elves;
 mod ground;
 mod lights;
@@ -270,7 +270,6 @@ impl Layer {
     pub fn heap_average(&self) -> f32 {
         self.heap.iter().sum::<f32>() / self.heap.len() as f32
     }
-    #[allow(dead_code)]
     pub fn snowman_pos(&self) -> Option<(f32, f32)> {
         self.snowman_pos
     }
