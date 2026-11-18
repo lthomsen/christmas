@@ -28,7 +28,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 - Mål CPU-forbruget før og efter ændringer i tegnekoden.
 
 ## Konventioner
-- Ingen billed- eller lydfiler. Al grafik tegnes i koden med GDI+.
+- Ingen billed- eller lydfiler. Al grafik tegnes i koden med GDI+. (This is about the app. README screenshots and the GIF live in `docs/media/`; keep them small and free of private desktop content.)
 - Figurerne skal være originale: dansk nisse med rød hue og gråt tøj, ingen kendte figurer.
 - Indstillinger gemmes i `Settings`. Nye felter skal have en standardværdi, så gamle `settings.ini`-filer stadig virker.
 - Fakta i `CalendarContent` er ikke kildetjekket. Tjek dem, før der tilføjes nye.
