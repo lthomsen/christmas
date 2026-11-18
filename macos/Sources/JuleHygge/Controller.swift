@@ -68,6 +68,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         if cfg.firstRun == nil { cfg.firstRun = JuleClock.today; cfg.save() }
         buildStatusItem()
         buildOverlays()
+        startUpdater()
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in
@@ -710,6 +711,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         }
         menu.addItem(autostartItem)
         menu.addItem(.separator())
+        let version = NSMenuItem(title: Updater.isReleaseBuild ? "Version \(Updater.current)" : Updater.notUpdatingReason, action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
+        if Updater.isReleaseBuild {
+            menu.addItem(toggle("Opdatér automatisk", { $0.autoUpdate }, { $0.autoUpdate = $1 }))
+            menu.addItem(item("Søg efter opdatering nu") { [unowned self] _ in checkForUpdate(manual: true) })
+        }
+        menu.addItem(.separator())
         menu.addItem(item("Afslut") { [unowned self] _ in exit() })
         statusItem.menu = menu
     }
@@ -763,7 +772,74 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         return parent
     }
 
+    // ------------------------------------------------------------------ automatic update
+    // A release build checks GitHub 1 minute after start and then every 6 hours. A newer release is downloaded,
+    // checked and swapped in, and the app restarts into it (see Updater).
+    private var updateTimer: Timer?
+    private var updateRunning = false
+
+    private func startUpdater() {
+        guard Updater.isReleaseBuild else { return }
+        let now = Updater.current.description
+        if cfg.lastVersion != now {
+            if !cfg.lastVersion.isEmpty { notify("Jule-hygge er opdateret", "Du kører nu version \(now).", opensCalendar: false) }
+            cfg.lastVersion = now
+            cfg.save()
+        }
+        // (JULE_UPDATE_DELAY=seconds shortens the wait before the first check, for tests)
+        let first = ProcessInfo.processInfo.environment["JULE_UPDATE_DELAY"].flatMap(Double.init) ?? 60
+        updateTimer = Timer.scheduledTimer(withTimeInterval: first, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if cfg.autoUpdate { checkForUpdate(manual: false) }
+            updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+                guard let self, cfg.autoUpdate else { return }
+                checkForUpdate(manual: false)
+            }
+        }
+    }
+
+    /// manual = the user asked from the menu, so every outcome is reported.
+    private func checkForUpdate(manual: Bool) {
+        if updateRunning { return }
+        updateRunning = true
+        DispatchQueue.global(qos: .utility).async {
+            let r = Updater.checkAndDownload()
+            DispatchQueue.main.async { [weak self] in self?.finishUpdate(r, manual: manual) }
+        }
+    }
+
+    private func finishUpdate(_ r: Updater.Result, manual: Bool) {
+        updateRunning = false
+        if let error = r.error {
+            ErrorLog.write("update failed: \(error)")
+            if manual { notify("Opdatering", "Kunne ikke opdatere: \(error)", opensCalendar: false) }
+            return
+        }
+        guard let app = r.newApp, let version = r.version else {
+            if manual { notify("Opdatering", "Du har den nyeste version (\(Updater.current)).", opensCalendar: false) }
+            return
+        }
+        do { try Updater.install(app) }
+        catch {
+            ErrorLog.write("update install: \(error)")
+            if manual { notify("Opdatering", "Kunne ikke installere version \(version): \(error.localizedDescription)", opensCalendar: false) }
+            return
+        }
+        ErrorLog.debug("update: installed \(version), restarting")
+        // Under the supervisor, a special exit code makes it start the new app. Without one, it is started from here.
+        shutDown()
+        if ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil { Foundation.exit(Updater.restartExitCode) }
+        Updater.relaunchAfterExit()
+        Foundation.exit(0)
+    }
+
     private func exit() {
+        shutDown()
+        NSApp.terminate(nil)
+    }
+
+    /// Stops everything and saves the settings.
+    private func shutDown() {
         camera.stop()
         audio.stopAll()
         stopTicker()
@@ -771,7 +847,6 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         for o in overlays { o.close() }
         overlays.removeAll()
         cfg.save()
-        NSApp.terminate(nil)
     }
 
     static func countdown() -> String {

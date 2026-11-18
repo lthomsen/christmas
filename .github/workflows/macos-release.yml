@@ -28,17 +28,34 @@ jobs:
           xcodebuild -version
           swift --version
 
+      # A release is stamped with its tag (v1.4.0 -> 1.4.0): the app's self-update only installs an app whose
+      # version matches the release tag. A manual run stays 0.0.0 (a developer build that never updates itself).
+      - name: Version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v=0.0.0
+          if [ "$EVENT" = release ]; then v="${TAG#v}"; v="${v#V}"; fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Tag must look like v1.2.3, got '$TAG'"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Build JuleHygge.app (universal)
         working-directory: macos
         env:
           UNIVERSAL: "1"
+          VERSION: ${{ steps.ver.outputs.version }}
         run: ./build.sh
 
       - name: Check and zip
         working-directory: macos/build
         run: |
           lipo -info JuleHygge.app/Contents/MacOS/JuleHygge
-          codesign --verify --verbose JuleHygge.app
+          codesign --verify --deep --strict --verbose JuleHygge.app
+          stamped=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' JuleHygge.app/Contents/Info.plist)
+          echo "version: $stamped"
+          [ "$stamped" = "${{ steps.ver.outputs.version }}" ] || { echo "Version stamp missing"; exit 1; }
           ditto -c -k --keepParent JuleHygge.app JuleHygge-macOS.zip
           shasum -a 256 JuleHygge-macOS.zip
 

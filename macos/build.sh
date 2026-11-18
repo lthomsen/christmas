@@ -13,7 +13,13 @@ rm -rf "$APP" "$ICONSET"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ICONSET"
 cp "$BIN" "$APP/Contents/MacOS/JuleHygge"
 cp Info.plist "$APP/Contents/Info.plist"
+# VERSION=x.y.z stamps the app (the GitHub workflow passes the release tag). Without it the app is 0.0.0,
+# which the app's self-update treats as a developer build that never updates itself.
+VERSION="${VERSION:-0.0.0}"
+if [[ ! "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then echo "VERSION skal se ud som 1.2.3, fik '$VERSION'" >&2; exit 1; fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+if [[ "$VERSION" != 0.0.0 ]]; then /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"; fi
 "$BIN" --icon "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/JuleHygge.icns"
 codesign --force --sign - "$APP" >/dev/null
-echo "Bygget: $PWD/$APP"
+echo "Bygget: $PWD/$APP (version $VERSION)"

@@ -44,6 +44,13 @@ if let a = args.first(where: { $0.hasPrefix("--kamera-replay=") }) {
     NisseHat.replay(dir: String(a.dropFirst(16)))
     exit(0)
 }
+// --opdatering-test=ZIP,VERSION: installs ZIP as if it were a downloaded release of VERSION, in place of the app
+// this is run from, and quits. For a copy of the app only.
+if let a = args.first(where: { $0.hasPrefix("--opdatering-test=") }) {
+    let parts = a.dropFirst(18).split(separator: ",", maxSplits: 1).map(String.init)
+    if parts.count == 2 { Updater.test(zip: parts[0], version: parts[1]) }
+    exit(0)
+}
 // --nissedragt-test=DIR,IMAGE: puts the camera's nisse beard and suit on the person in a photo, and quits.
 if let a = args.first(where: { $0.hasPrefix("--nissedragt-test=") }) {
     let parts = a.dropFirst(18).split(separator: ",", maxSplits: 1).map(String.init)
@@ -51,7 +58,7 @@ if let a = args.first(where: { $0.hasPrefix("--nissedragt-test=") }) {
     exit(0)
 }
 let isChild = ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil
-let testFlags = ["--nissehue-test", "--kamera-replay", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
+let testFlags = ["--nissehue-test", "--opdatering-test", "--kamera-replay", "--kamera-scene-test", "--kalender", "--julemand", "--sneplov", "--snapshot", "--effekt", "--skærmskift-test"]
 let wantsSupervisor = !isChild && ProcessInfo.processInfo.environment["JULE_NO_SUPERVISOR"] == nil
     && !args.dropFirst().contains(where: { a in testFlags.contains(where: { a.hasPrefix($0) }) })
 if wantsSupervisor {
@@ -71,6 +78,12 @@ if wantsSupervisor {
         do { try child.run() } catch { ErrorLog.write("supervisor: \(error)"); exit(1) }
         child.waitUntilExit()
         if child.terminationReason == .exit && child.terminationStatus == 0 { exit(0) }   // normal quit
+        // The child installed a new version of the app in this app's place: start that and step down (this
+        // process is still the old program).
+        if child.terminationReason == .exit && child.terminationStatus == Updater.restartExitCode {
+            Updater.relaunchAfterExit()
+            exit(0)
+        }
         ErrorLog.write("JuleHygge stoppede uventet (\(child.terminationReason == .uncaughtSignal ? "signal" : "kode") \(child.terminationStatus)); genstarter")
         quickCrashes = Date().timeIntervalSince(started) < 60 ? quickCrashes + 1 : 0
         if quickCrashes >= 3 { ErrorLog.write("supervisor: crasher igen og igen, giver op"); exit(1) }
