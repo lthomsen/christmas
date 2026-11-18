@@ -391,11 +391,14 @@ final class ScreenOverlay {
 
     // ------------------------------------------------------------------ sne
     private func updateSnow(_ dt: F) {
-        let baseCount = [110, 260, 650]
+        let baseCount: [F] = [110, 260, 650]
+        // between two levels while the weather changes
+        let amount = max(0, min(2, c.snowAmount)), lower = min(1, Int(amount))
+        let flakesWanted = baseCount[lower] + (baseCount[lower + 1] - baseCount[lower]) * (amount - F(lower))
         let logicalArea = W * H
         // Snow covers the whole screen also in power-save mode: a Mac handles it easily, power-save only lowers the frame rate.
         let areaShare: F = 1
-        let target = c.snowOn ? Int(F(baseCount[c.effectiveSnowLevel]) * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity * (isVirtual ? 1.8 : 1)) : 0
+        let target = c.snowOn ? Int(flakesWanted * min(2, logicalArea / (1920 * 1080)) * areaShare * c.snowIntensity * (isVirtual ? 1.8 : 1)) : 0
         // new flakes come in from the top; surplus flakes disappear only when they land
         let add = flakes.isEmpty ? target : max(1, target / 60)
         var i = 0

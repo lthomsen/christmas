@@ -7,7 +7,9 @@ final class Settings {
         pauseFullscreen = true, snowman = true, allScreens = true, plow = true,
         cameraPausesScreens = true, windowSnow = true, cameraHat = true, cameraFront = true, cameraBeard = true, cameraSuit = true,
         sound = false, plowSound = false   // lyd er slået fra, indtil man selv slår den til
-    var snowLevel = 1          // 0 = let, 1 = normal, 2 = snestorm
+    var autoUpdate = true      // install new GitHub releases by itself
+    var lastVersion = ""       // the version that ran last time, to announce an update
+    var snowLevel = 3          // 0 = let, 1 = normal, 2 = snestorm, 3 = skiftende vejr (Weather), som er standard
     var nisseCount = 3         // pr. skærm
     var powerSave = 2          // 0 = fra, 1 = altid til, 2 = kun på batteri
     var soundLevel = 1         // 0 = lav, 1 = middel, 2 = høj
@@ -57,10 +59,12 @@ final class Settings {
         s.cameraPausesScreens = b("CameraPausesScreens", s.cameraPausesScreens)
         s.plowSound = b("PlowSound", s.plowSound)
         s.soundLevel = max(0, min(2, i("SoundLevel", s.soundLevel)))
-        s.snowLevel = max(0, min(2, i("SnowLevel", s.snowLevel)))
+        s.snowLevel = max(0, min(3, i("SnowLevel", s.snowLevel)))
         s.nisseCount = max(1, min(12, i("NisseCount", s.nisseCount)))
         s.powerSave = max(0, min(2, i("PowerSave", s.powerSave)))
         s.frameRate = [12, 20, 30, 60].contains(i("FrameRate", 20)) ? i("FrameRate", 20) : 20
+        s.autoUpdate = b("AutoUpdate", s.autoUpdate)
+        s.lastVersion = d["LastVersion"] ?? ""
         s.snowmanSeenStage = i("SnowmanSeenStage", 0)
         s.calendarYear = i("CalendarYear", 0)
         s.firstRun = d["FirstRun"].flatMap(JuleClock.parse)
@@ -80,6 +84,7 @@ final class Settings {
             "Nisser=" + b(nisser), "Lights=" + b(lights), "PauseFullscreen=" + b(pauseFullscreen),
             "Snowman=" + b(snowman), "AllScreens=" + b(allScreens), "Plow=" + b(plow), "WindowSnow=" + b(windowSnow), "CameraHat=" + b(cameraHat), "CameraFront=" + b(cameraFront), "CameraBeard=" + b(cameraBeard), "CameraSuit=" + b(cameraSuit), "Sound=" + b(sound), "CameraPausesScreens=" + b(cameraPausesScreens), "PlowSound=" + b(plowSound), "SoundLevel=\(soundLevel)",
             "SnowLevel=\(snowLevel)", "NisseCount=\(nisseCount)", "PowerSave=\(powerSave)", "FrameRate=\(frameRate)",
+            "AutoUpdate=" + b(autoUpdate), "LastVersion=" + lastVersion,
             "SnowmanSeenStage=\(snowmanSeenStage)", "CalendarYear=\(calendarYear)",
             "FirstRun=" + ds(firstRun), "LastDoorNotice=" + ds(lastDoorNotice),
             "OpenedDoors=" + openedDoors.sorted().map(String.init).joined(separator: ","),

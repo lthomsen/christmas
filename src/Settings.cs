@@ -11,7 +11,7 @@ namespace JuleHygge
         public bool Snow = true, SnowGround = true, Santa = true, Nisser = true, Lights = true,
                     PauseFullscreen = true, Snowman = true, AllScreens = true, Plow = true, WindowSnow = true;
         public bool Sound = false, PlowSound = false;   // sound is always off by default
-        public int SnowLevel = 1;          // 0 = let, 1 = normal, 2 = snestorm
+        public int SnowLevel = 3;          // 0 = let, 1 = normal, 2 = snestorm, 3 = skiftende vejr (Weather), som er standard
         public int NisseCount = 3;         // pr. skærm
         public int PowerSave = 2;          // 0 = off, 1 = always on, 2 = only on battery
         public int SoundLevel = 1;         // 0 = low, 1 = medium, 2 = high
@@ -75,7 +75,7 @@ namespace JuleHygge
             s.SoundLevel = Math.Max(0, Math.Min(2, I(d, "SoundLevel", s.SoundLevel)));
             s.FrameRate = I(d, "FrameRate", s.FrameRate);
             if (Array.IndexOf(new[] { 12, 20, 30, 60 }, s.FrameRate) < 0) s.FrameRate = 20;
-            s.SnowLevel = Math.Max(0, Math.Min(2, I(d, "SnowLevel", s.SnowLevel)));
+            s.SnowLevel = Math.Max(0, Math.Min(3, I(d, "SnowLevel", s.SnowLevel)));
             s.NisseCount = Math.Max(1, Math.Min(12, I(d, "NisseCount", s.NisseCount)));
             s.PowerSave = Math.Max(0, Math.Min(2, I(d, "PowerSave", s.PowerSave)));
             s.AutoUpdate = B(d, "AutoUpdate", s.AutoUpdate);

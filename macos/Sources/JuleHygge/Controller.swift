@@ -52,7 +52,11 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
     private(set) var powerSave = false
 
     var santaY: F { santaY0 + sin(santaPhase * 0.9) * 40 * santaScale }
-    var effectiveSnowLevel: Int { time < stormUntil ? 2 : cfg.snowLevel }
+    /// 0 light, 1 normal, 2 storm. Setting 3 ("Skiftende vejr") lets the weather pick (see Weather).
+    var effectiveSnowLevel: Int { let a = snowAmount; return a > 1.5 ? 2 : a > 0.5 ? 1 : 0 }
+    /// The same as a number that glides between the levels while the weather changes (0 light … 2 storm): the
+    /// number of flakes follows this, so a change comes on gradually; wind, speed and drifts follow the level.
+    var snowAmount: F { time < stormUntil ? 2 : cfg.snowLevel == 3 ? F(Weather.amount()) : F(cfg.snowLevel) }
     var snowOn: Bool { cfg.snow || time < stormUntil }
 
     /// Snowfall slowly drifts between ~60 % and ~140 % of the chosen amount (two slow waves of about
@@ -68,6 +72,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         if cfg.firstRun == nil { cfg.firstRun = JuleClock.today; cfg.save() }
         buildStatusItem()
         buildOverlays()
+        startUpdater()
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in
@@ -659,7 +664,7 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         menu.addItem(.separator())
 
         menu.addItem(toggle("Snevejr", { $0.snow }, { $0.snow = $1 }))
-        menu.addItem(choice("Snemængde", ["Let sne", "Normal", "Snestorm"], [0, 1, 2], { $0.snowLevel }, { $0.snowLevel = $1 }))
+        menu.addItem(choice("Snemængde", ["Let sne", "Normal", "Snestorm", "Skiftende vejr"], [0, 1, 2, 3], { $0.snowLevel }, { $0.snowLevel = $1 }))
         menu.addItem(toggle("Sne i bunden af skærmen", { $0.snowGround }, { $0.snowGround = $1 }))
         menu.addItem(toggle("Sne på vinduerne", { $0.windowSnow }, { $0.windowSnow = $1 }))
         snowmanItem = toggle("Snemand", { $0.snowman }, { $0.snowman = $1 })
@@ -709,6 +714,14 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
             it.state = Self.autostart ? .on : .off
         }
         menu.addItem(autostartItem)
+        menu.addItem(.separator())
+        let version = NSMenuItem(title: Updater.isReleaseBuild ? "Version \(Updater.current)" : Updater.notUpdatingReason, action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
+        if Updater.isReleaseBuild {
+            menu.addItem(toggle("Opdatér automatisk", { $0.autoUpdate }, { $0.autoUpdate = $1 }))
+            menu.addItem(item("Søg efter opdatering nu") { [unowned self] _ in checkForUpdate(manual: true) })
+        }
         menu.addItem(.separator())
         menu.addItem(item("Afslut") { [unowned self] _ in exit() })
         statusItem.menu = menu
@@ -763,7 +776,74 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         return parent
     }
 
+    // ------------------------------------------------------------------ automatic update
+    // A release build checks GitHub 1 minute after start and then every 6 hours. A newer release is downloaded,
+    // checked and swapped in, and the app restarts into it (see Updater).
+    private var updateTimer: Timer?
+    private var updateRunning = false
+
+    private func startUpdater() {
+        guard Updater.isReleaseBuild else { return }
+        let now = Updater.current.description
+        if cfg.lastVersion != now {
+            if !cfg.lastVersion.isEmpty { notify("Jule-hygge er opdateret", "Du kører nu version \(now).", opensCalendar: false) }
+            cfg.lastVersion = now
+            cfg.save()
+        }
+        // (JULE_UPDATE_DELAY=seconds shortens the wait before the first check, for tests)
+        let first = ProcessInfo.processInfo.environment["JULE_UPDATE_DELAY"].flatMap(Double.init) ?? 60
+        updateTimer = Timer.scheduledTimer(withTimeInterval: first, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if cfg.autoUpdate { checkForUpdate(manual: false) }
+            updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+                guard let self, cfg.autoUpdate else { return }
+                checkForUpdate(manual: false)
+            }
+        }
+    }
+
+    /// manual = the user asked from the menu, so every outcome is reported.
+    private func checkForUpdate(manual: Bool) {
+        if updateRunning { return }
+        updateRunning = true
+        DispatchQueue.global(qos: .utility).async {
+            let r = Updater.checkAndDownload()
+            DispatchQueue.main.async { [weak self] in self?.finishUpdate(r, manual: manual) }
+        }
+    }
+
+    private func finishUpdate(_ r: Updater.Result, manual: Bool) {
+        updateRunning = false
+        if let error = r.error {
+            ErrorLog.write("update failed: \(error)")
+            if manual { notify("Opdatering", "Kunne ikke opdatere: \(error)", opensCalendar: false) }
+            return
+        }
+        guard let app = r.newApp, let version = r.version else {
+            if manual { notify("Opdatering", "Du har den nyeste version (\(Updater.current)).", opensCalendar: false) }
+            return
+        }
+        do { try Updater.install(app) }
+        catch {
+            ErrorLog.write("update install: \(error)")
+            if manual { notify("Opdatering", "Kunne ikke installere version \(version): \(error.localizedDescription)", opensCalendar: false) }
+            return
+        }
+        ErrorLog.debug("update: installed \(version), restarting")
+        // Under the supervisor, a special exit code makes it start the new app. Without one, it is started from here.
+        shutDown()
+        if ProcessInfo.processInfo.environment["JULE_SUPERVISOR"] != nil { Foundation.exit(Updater.restartExitCode) }
+        Updater.relaunchAfterExit()
+        Foundation.exit(0)
+    }
+
     private func exit() {
+        shutDown()
+        NSApp.terminate(nil)
+    }
+
+    /// Stops everything and saves the settings.
+    private func shutDown() {
         camera.stop()
         audio.stopAll()
         stopTicker()
@@ -771,7 +851,6 @@ final class Controller: NSObject, NSMenuDelegate, UNUserNotificationCenterDelega
         for o in overlays { o.close() }
         overlays.removeAll()
         cfg.save()
-        NSApp.terminate(nil)
     }
 
     static func countdown() -> String {
