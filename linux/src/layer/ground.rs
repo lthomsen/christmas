@@ -171,6 +171,14 @@ impl Layer {
         gi.pile_rect = pile_rect;
         gi.snowman_rect = snowman_rect;
         self.ground_shown = true;
+        // snow on a window low enough to reach into the band stays in front of the copied ground
+        self.canvas.surface.flush();
+        for r in &redraw {
+            for y in r.y..r.bottom() {
+                self.overlay_ledges(y, r.x as usize, r.right() as usize);
+            }
+        }
+        self.canvas.surface.mark_dirty();
     }
 }
 

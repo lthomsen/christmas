@@ -17,6 +17,7 @@ pub const MENU_SNOW: &str = "Snevejr";
 pub const MENU_SNOW_LEVEL: &str = "Snemængde";
 pub const SNOW_LEVELS: [&str; 4] = ["Let sne", "Normal", "Snestorm", "Skiftende vejr"];
 pub const MENU_SNOW_GROUND: &str = "Sne på panelet";
+pub const MENU_WINDOW_SNOW: &str = "Sne på vinduerne";
 pub const MENU_SANTA: &str = "Julemanden";
 pub const MENU_SEND_SANTA: &str = "Send julemanden afsted nu!";
 pub const MENU_PLOW: &str = "Sneplov rydder panelet";
@@ -43,6 +44,12 @@ pub const MENU_ALL_SCREENS: &str = "Vis på alle skærme";
 pub const MENU_PAUSE_FULLSCREEN: &str = "Pause ved fuldskærm (spil/film)";
 pub const MENU_AUTOSTART: &str = "Start ved login";
 pub const MENU_DEV_VERSION: &str = "Udviklerversion (opdaterer ikke)";
+pub const MENU_AUTO_UPDATE: &str = "Opdatér automatisk";
+pub const MENU_CHECK_UPDATE: &str = "Søg efter opdatering nu";
+
+pub fn menu_version(v: &str) -> String {
+    format!("Version {v}")
+}
 
 pub fn menu_snowman(stage: i32, max: i32) -> String {
     format!("Snemand (trin {stage} af {max})")
@@ -65,6 +72,25 @@ pub const NOTICE_SNOWMAN_TITLE: &str = "Snemanden vokser!";
 pub const NOTICE_DOOR_TITLE: &str = "Dagens låge er klar!";
 /// The action on the door notice (shown as a button by some desktops).
 pub const NOTICE_OPEN_CALENDAR: &str = "Åbn kalenderen";
+
+pub const NOTICE_UPDATED_TITLE: &str = "Jule-hygge er opdateret";
+pub const NOTICE_UPDATE_TITLE: &str = "Opdatering";
+
+pub fn notice_updated(v: &str) -> String {
+    format!("Du kører nu version {v}.")
+}
+
+pub fn notice_up_to_date(v: &str) -> String {
+    format!("Du har den nyeste version ({v}).")
+}
+
+pub fn notice_update_failed(e: &str) -> String {
+    format!("Kunne ikke opdatere: {e}")
+}
+
+pub fn notice_install_failed(v: &str, e: &str) -> String {
+    format!("Kunne ikke installere version {v}: {e}")
+}
 
 pub fn notice_snowman(step: &str) -> String {
     format!("Nisserne har bygget videre på snemanden. I dag fik den {step}")

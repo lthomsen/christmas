@@ -5,7 +5,7 @@
 //! bottom) with storm drifts, and the fullscreen pause live here. The figures are in submodules, which as child
 //! modules share this file's private fields (like the one big `Layer` class on Windows): the Christmas lights
 //! (`lights`), Santa and the sparks (`santa`), the snowman (`snowman`), the snow plow (`plow`) and the elves
-//! (`elves`); `draw` has the Cairo helpers they use. Snow on windows follows in phase 5.
+//! (`elves`), and snow on other windows' top edges (`ledges`); `draw` has the Cairo helpers they use.
 //!
 //! The Windows optimisations are kept, because the overlay covers whole 4K screens:
 //! - only what was drawn in the previous frame is cleared (`mark()` and `clear_rects()`), and only that plus
@@ -22,6 +22,7 @@ use cairo::{Context, Format, ImageSurface};
 pub(crate) mod draw;
 mod elves;
 mod ground;
+mod ledges;
 mod lights;
 mod plow;
 mod santa;
@@ -32,6 +33,7 @@ pub use snowman::MAX_STAGE as SNOWMAN_MAX_STAGE;
 
 use crate::figures::{PlowRun, Santa, Spark};
 use crate::rng::Rng;
+use crate::window_snow::{Clump, Ledge};
 use crate::x11::{Rect, Res};
 
 /// What the controller shares with every screen for one frame.
@@ -66,6 +68,12 @@ pub struct SceneState<'a> {
     pub santa: Option<&'a Santa>,
     pub sparks: &'a [Spark],
     pub plow: Option<&'a PlowRun>,
+    /// Snow on windows (setting `WindowSnow`): the windows' edges and the clumps falling off, in global
+    /// coordinates, and the scale their sizes are in (the desktop scale).
+    pub window_snow: bool,
+    pub ledges: &'a [Ledge],
+    pub clumps: &'a [Clump],
+    pub ledge_u: f32,
 }
 
 /// Width in pixels of one column of the snow pile, as on Windows.
@@ -83,8 +91,7 @@ struct Flake {
     rot_spd: f32,
     a: i32,
     crystal: bool,
-    /// About half the flakes can land on a window's top edge (phase 5).
-    #[allow(dead_code)]
+    /// About half the flakes can land on a window's top edge (the rest fall past to the ground).
     catches: bool,
 }
 
@@ -163,6 +170,11 @@ pub struct Layer {
     /// The cached ground is in the buffer, so clearing restores it.
     ground_shown: bool,
     lights: Option<lights::LightsImage>,
+    /// The lights strip changed on screen this frame (twinkled, appeared or went): snow on windows under it is
+    /// drawn again, since its cache has the strip blended in.
+    lights_redrawn: bool,
+    /// Snow on windows as it is on this screen, restored by clearing (`ledges.rs`).
+    ledge_cache: Vec<ledges::CachedLedge>,
     /// The lights strip is in the buffer, so clearing restores it instead of leaving it empty.
     lights_shown: bool,
     /// Where the snowman stands, in global coordinates (for the celebration sparks in phase 4).
@@ -176,6 +188,10 @@ pub struct Layer {
     next_elf_id: u64,
     elf_offset: i32,
     elf_change_timer: f32,
+    /// Flakes that landed on a window's edge this frame (ledge index, global x, radius without the screen
+    /// scale), and clumps that reached this screen's pile; the controller applies them.
+    ledge_hits: Vec<(usize, f32, f32)>,
+    clumps_landed: Vec<usize>,
 }
 
 impl Layer {
@@ -225,6 +241,8 @@ impl Layer {
             ground: None,
             ground_shown: false,
             lights: None,
+            lights_redrawn: false,
+            ledge_cache: Vec::new(),
             lights_shown: false,
             snowman_pos: None,
             plow_bits: Vec::new(),
@@ -237,6 +255,8 @@ impl Layer {
             next_elf_id: seed << 20,
             elf_offset: 0,
             elf_change_timer: 90.0,
+            ledge_hits: Vec::new(),
+            clumps_landed: Vec::new(),
         })
     }
 
@@ -265,6 +285,14 @@ impl Layer {
     /// The figure scale: screen height / 1080.
     pub fn scale(&self) -> f32 {
         self.s
+    }
+    /// Flakes that landed on window edges since the last call: (ledge index, global x, radius in points).
+    pub fn take_ledge_hits(&mut self) -> Vec<(usize, f32, f32)> {
+        std::mem::take(&mut self.ledge_hits)
+    }
+    /// Clumps (indexes) that landed in this screen's pile since the last call.
+    pub fn take_clumps_landed(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.clumps_landed)
     }
     /// Average height of the pile (the snow plow comes when it gets high).
     pub fn heap_average(&self) -> f32 {
@@ -308,6 +336,7 @@ impl Layer {
                 // the strip and the ground are copied in again when the screen resumes
                 self.lights_shown = false;
                 self.ground_shown = false;
+                self.forget_ledges();
                 self.paused = true;
             }
             return Present::Nothing;
@@ -330,11 +359,14 @@ impl Layer {
         // back to front, as on Windows
         self.present_only.clear();
         self.draw_lights(dt, st);
+        // snow on other windows sits on those windows: the light string (blended over it in `draw_ledges`) and
+        // everything that moves is drawn over it, as on Windows
+        self.draw_ledges(dt, st);
         self.draw_ground(dt, st);
         self.draw_santa_and_sparks(st);
         self.draw_elves();
         self.draw_plow(st);
-        self.draw_snow();
+        self.draw_snow(st);
         self.canvas.surface.flush();
 
         let result = self.plan_present(&cleared);
@@ -374,10 +406,9 @@ impl Layer {
         Present::Rects
     }
 
-    /// Empties the rectangles again, except where the lights strip or the ground are shown: there their cached
-    /// images are restored.
+    /// Empties the rectangles again, except where cached things are shown (the lights strip, the ground, snow on
+    /// windows): there their images are restored.
     fn clear_rects(&mut self, rects: &[Rect]) {
-        let w = self.w as usize;
         for r in rects {
             let c = r.clip(self.w, self.h);
             if c.is_empty() {
@@ -385,11 +416,17 @@ impl Layer {
             }
             let (x0, x1) = (c.x as usize, c.right() as usize);
             for y in c.y..c.bottom() {
-                if !self.restore_lights(y, x0, x1) && !self.restore_ground(y, x0, x1) {
-                    let start = y as usize * w;
-                    self.canvas.pixels[start + x0..start + x1].fill(0);
-                }
+                self.restore_background(y, x0, x1);
+                self.overlay_ledges(y, x0, x1);
             }
+        }
+    }
+
+    /// Row `y`, pixels `x0..x1`, as the lights strip or the ground leave it, or empty.
+    fn restore_background(&mut self, y: i32, x0: usize, x1: usize) {
+        if !self.restore_lights(y, x0, x1) && !self.restore_ground(y, x0, x1) {
+            let start = y as usize * self.w as usize;
+            self.canvas.pixels[start + x0..start + x1].fill(0);
         }
     }
 
@@ -420,10 +457,13 @@ impl Layer {
 
         let wind = st.wind * self.s;
         let (w, s, ground) = (self.w as f32, self.s, self.ground_y);
+        let (ox, oy) = (self.rect.x as f32, self.rect.y as f32);
+        let ledges = st.window_snow && !st.ledges.is_empty();
         let mut i = self.flakes.len();
         while i > 0 {
             i -= 1;
             let f = &mut self.flakes[i];
+            let prev_y = f.y;
             f.y += f.vy * dt;
             let sway = (st.time * f.sway_spd as f64 + f.phase as f64).cos() as f32;
             f.x += (wind * (0.4 + f.r / (4.0 * s)) + sway * f.sway) * dt;
@@ -433,7 +473,24 @@ impl Layer {
             } else if f.x > w + 60.0 {
                 f.x -= w + 120.0;
             }
-            // Phase 5: some flakes land on a window's top edge here.
+            // some flakes land on a window's top edge (or the snow already on it)
+            if f.catches && ledges {
+                let (gx, gy, py) = (f.x + ox, f.y + oy, prev_y + oy);
+                let hit = st.ledges.iter().position(|l| {
+                    let top = l.settled.y - l.height_at(gx);
+                    !l.moving && py < top && gy >= top && l.is_visible(gx)
+                });
+                if let Some(li) = hit {
+                    self.ledge_hits.push((li, gx, f.r / s));
+                    if self.flakes.len() > target {
+                        self.flakes.swap_remove(i);
+                    } else {
+                        let nf = self.new_flake(false, st);
+                        self.flakes[i] = nf;
+                    }
+                    continue;
+                }
+            }
             if f.y >= ground - heap_at(&self.heap, f.x) {
                 let (x, r) = (f.x, f.r);
                 if st.snow_ground {
@@ -487,7 +544,17 @@ impl Layer {
                 self.heap[i + 1] -= m;
             }
         }
-        // Phase 5: snow falling off a window that went away lands in the pile here.
+        // snow falling off a window that went away lands in the pile below
+        let (ox, oy) = (self.rect.x as f32, self.rect.y as f32);
+        for (ci, c) in st.clumps.iter().enumerate() {
+            let (x, y) = (c.x - ox, c.y - oy);
+            if !c.dead && x >= 0.0 && x < self.w as f32 && y >= 0.0 && y >= self.ground_y - heap_at(&self.heap, x) {
+                if st.snow_ground {
+                    self.deposit(x, c.r * s, st);
+                }
+                self.clumps_landed.push(ci);
+            }
+        }
         let melt = !st.snow_on || !st.snow_ground;
         let (ox, dpi) = (self.rect.x as f64, self.dpi_scale as f64);
         for (i, h) in self.heap.iter_mut().enumerate() {
@@ -583,7 +650,7 @@ impl Layer {
         }
     }
 
-    fn draw_snow(&mut self) {
+    fn draw_snow(&mut self, st: &SceneState) {
         // Dots go straight into the buffer, so Cairo must finish the figures first.
         self.canvas.surface.flush();
         for i in 0..self.flakes.len() {
@@ -599,7 +666,16 @@ impl Layer {
                 self.blend_dot(x, y, r, a);
             }
         }
-        // Phase 5: clumps falling off a window that went away.
+        // clumps falling off a window that went away
+        let (ox, oy) = (self.rect.x as f32, self.rect.y as f32);
+        for c in st.clumps {
+            let (x, y, r) = (c.x - ox, c.y - oy, c.r * self.s);
+            if c.dead || x < -10.0 || x > self.w as f32 + 10.0 || y < -10.0 || y > self.h as f32 + 10.0 {
+                continue;
+            }
+            self.mark(x - r, y - r, r * 2.0, r * 2.0);
+            self.blend_dot(x, y, r, 242);
+        }
 
         // Crystals: three crossing lines, drawn with Cairo.
         self.canvas.surface.mark_dirty();
@@ -702,6 +778,10 @@ mod tests {
             santa: None,
             sparks: &[],
             plow: None,
+            window_snow: true,
+            ledges: &[],
+            clumps: &[],
+            ledge_u: 1.0,
         }
     }
 
@@ -892,6 +972,71 @@ mod tests {
                 assert!(drawn || p == q, "lights erased at {x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn flakes_land_on_window_edges_and_the_snow_is_drawn_under_the_lights() {
+        use crate::window_snow::{FRect, WinInfo, WindowSnow};
+        let rect = Rect::new(0, 0, 1280, 720);
+        let mut l = Layer::new(rect, true, 1.0, 21).unwrap();
+        let mut ws = WindowSnow::new(1.0, 5);
+        // one window whose top edge is inside the lights strip (y 30 < 70 * s), one lower down
+        let win =
+            |id, y| WinInfo { id, rect: FRect { x: 200.0, y, w: 700.0, h: 300.0 }, visible: vec![(206.0, 894.0)] };
+        ws.update_ledges(vec![win(1, 30.0), win(2, 400.0)]);
+        let mut t = 5.0;
+        for _ in 0..1200 {
+            t += 0.05;
+            let st = SceneState {
+                time: t,
+                lights: true,
+                snow_amount: 2.0,
+                ledges: &ws.ledges,
+                clumps: &ws.clumps,
+                ..state()
+            };
+            l.frame(0.05, &st);
+            for (li, x, r) in l.take_ledge_hits() {
+                ws.ledges[li].deposit(x, r);
+            }
+            ws.update(0.05, false, false, 0.0, 720.0);
+        }
+        assert!(ws.ledges.iter().all(|e| e.has_snow), "no snow landed on a window");
+        // the cached snow on windows is what clearing restores: every lit pixel was drawn this frame or is that
+        let background = l.background();
+        let w = l.width();
+        for (i, (p, b)) in l.pixels().iter().zip(&background).enumerate() {
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            let drawn = l.prev_dirty.iter().any(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom());
+            assert!(*p == *b || drawn, "stale pixel at {x},{y}");
+        }
+        assert!(background[396 * w as usize..400 * w as usize].iter().any(|p| *p >> 24 > 200), "no cached snow");
+        // snow on the edge at y 30: white pixels just above it, and the lights still on top somewhere in the strip
+        let w = l.width() as usize;
+        let white = (200..900).filter(|&x| l.pixels()[28 * w + x] >> 24 > 200).count();
+        assert!(white > 100, "only {white} snow pixels on the edge under the lights");
+        // closing both windows lets the snow fall, and it lands in this screen's pile
+        ws.update_ledges(vec![]);
+        let falling = ws.clumps.len();
+        assert!(falling > 0);
+        let mut landed = 0;
+        for _ in 0..100 {
+            t += 0.05;
+            let st = SceneState { time: t, ledges: &ws.ledges, clumps: &ws.clumps, ..state() };
+            l.frame(0.05, &st);
+            for ci in l.take_clumps_landed() {
+                ws.clumps[ci].dead = true;
+                landed += 1;
+            }
+            ws.update(0.05, false, false, 0.0, 720.0);
+        }
+        assert!(ws.clumps.is_empty());
+        // all of them land on this screen's ground (none fall past it)
+        assert_eq!(landed, falling, "the clumps did not reach the pile");
+        // and nothing of the windows' snow is left: not on screen, not in the cache
+        let background = l.background();
+        assert!(background[396 * w..400 * w].iter().all(|p| *p == 0), "cached snow left where the window was");
+        assert!(l.pixels()[396 * w + 300..396 * w + 800].iter().all(|p| *p >> 24 < 200), "snow left on screen");
     }
 
     #[test]

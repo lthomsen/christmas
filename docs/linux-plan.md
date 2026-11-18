@@ -1,6 +1,6 @@
 # JuleHygge on Linux — analysis and plan
 
-> **Status (2026-11-18):** Phase 1 code is written in `linux/` but has **not been compiled or run yet** (it was written on a Windows machine without Rust). Next step: build and test it on Linux Mint, then Ubuntu. Target: Ubuntu 22.04+ and Linux Mint 21+ (x86_64).
+> **Status (2026-11-18):** All six phases are built in `linux/` and tested on Linux Mint 22.3 (Cinnamon, X11, two monitors at 2x). Ubuntu on Wayland (XWayland) is the next test round. Target: Ubuntu 22.04+ and Linux Mint 21+ (x86_64). The updater checks `rkl1976/christmas` (upstream). Differences from this plan found while building are in `AGENTS.md` (Linux section).
 
 ## Starting point
 The Windows version (`src/`, C# 5, WinForms + GDI+) and the macOS version (`macos/`, Swift + AppKit) are both native, and the drawing code in `Overlay.swift` follows `src/Layer.cs` line by line. Linux gets a third native version in the same way, in `linux/`, written in **Rust**. Windows and macOS are not touched.

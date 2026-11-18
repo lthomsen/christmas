@@ -105,8 +105,22 @@ pub fn line(cr: &Context, c: Argb, width: f64, cap: LineCap, x1: f64, y1: f64, x
 /// A smooth curve through all points, like GDI+ `DrawCurve` (a cardinal spline with tension 0.5), added to the
 /// current path.
 pub fn curve_path(cr: &Context, pts: &[(f64, f64)]) {
+    curve(cr, pts, false);
+}
+
+/// As `curve_path`, but joined to the current path with a straight line (GDI+ `AddCurve` on a path that already
+/// has a figure).
+pub fn curve_path_joined(cr: &Context, pts: &[(f64, f64)]) {
+    curve(cr, pts, true);
+}
+
+fn curve(cr: &Context, pts: &[(f64, f64)], joined: bool) {
     let Some(&(x0, y0)) = pts.first() else { return };
-    cr.move_to(x0, y0);
+    if joined {
+        cr.line_to(x0, y0);
+    } else {
+        cr.move_to(x0, y0);
+    }
     let k = 0.5 / 3.0;
     let n = pts.len();
     for i in 0..n - 1 {

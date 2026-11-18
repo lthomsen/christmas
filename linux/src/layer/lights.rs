@@ -113,6 +113,33 @@ impl Layer {
         (70.0 * self.s) as i32
     }
 
+    /// Rows of the lights strip as shown now (0 when the lights are off).
+    pub(super) fn lights_strip_height(&self) -> i32 {
+        self.lights.as_ref().filter(|_| self.lights_shown).map_or(0, |l| l.h)
+    }
+
+    /// Blends the strip over what is in `r` (premultiplied "over"), for snow on windows under the lights.
+    /// Cairo must be flushed before and marked dirty after.
+    pub(super) fn blend_lights_over(&mut self, r: Rect) {
+        let Some(l) = self.lights.as_ref().filter(|_| self.lights_shown) else { return };
+        let r = r.clip(self.w, l.h);
+        let w = self.w as usize;
+        for y in r.y..r.bottom() {
+            let start = y as usize * w + r.x as usize;
+            let (src, dst) =
+                (&l.current.pixels[start..start + r.w as usize], &mut self.canvas.pixels[start..start + r.w as usize]);
+            for (d, s) in dst.iter_mut().zip(src) {
+                let sa = s >> 24;
+                if sa == 0 {
+                    continue;
+                }
+                let inv = 255 - sa;
+                let ch = |sh: u32| (((s >> sh) & 0xFF) + ((*d >> sh) & 0xFF) * inv / 255).min(255);
+                *d = (ch(24) << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+            }
+        }
+    }
+
     /// Restores row `y`, pixels `x0..x1`, from the lights strip if it is shown there; false if not.
     pub(super) fn restore_lights(&mut self, y: i32, x0: usize, x1: usize) -> bool {
         let Some(l) = self.lights.as_ref().filter(|l| self.lights_shown && y < l.h) else { return false };
@@ -127,6 +154,7 @@ impl Layer {
             if self.lights_shown {
                 // clear the strip next frame (it is no longer restored from the image)
                 self.lights_shown = false;
+                self.lights_redrawn = true;
                 self.mark(0.0, 0.0, self.w as f32, lh as f32);
             }
             return;
@@ -170,5 +198,6 @@ impl Layer {
         }
         self.canvas.surface.mark_dirty();
         self.lights_shown = true;
+        self.lights_redrawn = true;
     }
 }

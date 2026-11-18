@@ -65,6 +65,21 @@ pub fn argb_be(size: i32) -> Res<Vec<u8>> {
     Ok(out)
 }
 
+/// Writes the icon as a PNG of `size` pixels (`--write-icon`, for the menu entry `install.sh` makes).
+pub fn write_png(size: i32, path: &std::path::Path) -> Res<()> {
+    let surface = ImageSurface::create(Format::ARgb32, size, size)?;
+    {
+        let cr = Context::new(&surface)?;
+        draw(&cr, size as f64)?;
+    }
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    surface.write_to_png(&mut f)?;
+    Ok(())
+}
+
 /// The icon as straight ARGB values, as `_NET_WM_ICON` wants it.
 pub fn argb_u32(size: i32) -> Res<Vec<u32>> {
     Ok(argb_be(size)?.as_chunks::<4>().0.iter().map(|c| u32::from_be_bytes(*c)).collect())

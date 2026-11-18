@@ -213,6 +213,8 @@ impl Settings {
         self.lights = m.lights;
         self.all_screens = m.all_screens;
         self.pause_fullscreen = m.pause_fullscreen;
+        self.window_snow = m.window_snow;
+        self.auto_update = m.auto_update;
         old
     }
 

@@ -23,6 +23,7 @@ pub enum TrayMsg {
     Plow,
     Settings(Box<Settings>),
     Autostart(bool),
+    CheckUpdate,
 }
 
 pub struct AppTray {
@@ -143,6 +144,7 @@ impl ksni::Tray for AppTray {
             &mut s.snow_level
         }));
         items.push(toggle(text::MENU_SNOW_GROUND.into(), c.snow_ground, |s| &mut s.snow_ground));
+        items.push(toggle(text::MENU_WINDOW_SNOW.into(), c.window_snow, |s| &mut s.window_snow));
         let snowman = text::menu_snowman(self.snowman_stage, crate::layer::SNOWMAN_MAX_STAGE);
         items.push(toggle(snowman, c.snowman, |s| &mut s.snowman));
         items.push(MenuItem::Separator);
@@ -187,8 +189,13 @@ impl ksni::Tray for AppTray {
         );
         items.push(MenuItem::Separator);
 
-        // phase 6 adds the version and the update items of a release build
-        items.push(disabled(text::MENU_DEV_VERSION.into()));
+        if crate::updater::is_release_build() {
+            items.push(disabled(text::menu_version(&crate::updater::display(crate::updater::current()))));
+            items.push(toggle(text::MENU_AUTO_UPDATE.into(), c.auto_update, |s| &mut s.auto_update));
+            items.push(item(text::MENU_CHECK_UPDATE, || TrayMsg::CheckUpdate));
+        } else {
+            items.push(disabled(text::MENU_DEV_VERSION.into()));
+        }
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {

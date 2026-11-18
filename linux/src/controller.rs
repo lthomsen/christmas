@@ -23,6 +23,7 @@ use crate::sound::{AudioHub, Voice};
 use crate::text;
 use crate::tray::{TrayHandle, TrayMsg};
 use crate::weather::Weather;
+use crate::window_snow::WindowSnow;
 use crate::x11::{Display, Monitor, OverlayWindow, Rect, Res};
 
 #[derive(Default)]
@@ -78,10 +79,17 @@ pub struct Controller {
     last_day: NaiveDate,
     calendar: Option<Calendar>,
     sounds: Sounds,
+    /// Snow on other windows' top edges, and when to look at the windows again.
+    window_snow: WindowSnow,
+    scan_timer: f32,
     /// A calendar storm lasts until this time.
     storm_until: f64,
     /// The snowman grew today: celebrate with sparks at this time.
     celebrate_at: Option<f64>,
+    /// A release build checks for updates 1 minute after start and then every 6 hours.
+    update_timer: f32,
+    /// A check running on a worker thread; `true` when asked for from the menu (then every outcome is reported).
+    update_check: Option<(Receiver<crate::updater::Outcome>, bool)>,
 
     /// Seconds since start, as a double (see `SceneState::time`).
     time: f64,
@@ -134,6 +142,7 @@ impl Controller {
         let snow_phase_a = rng.f64() * 2.0 * std::f64::consts::PI;
         let snow_phase_b = rng.f64() * 2.0 * std::f64::consts::PI;
         let figures_seed = rng.next_u64();
+        let (display_scale, window_snow_seed) = (display.dpi_scale, rng.next_u64());
         let mut c = Controller {
             display,
             cfg,
@@ -150,8 +159,13 @@ impl Controller {
             last_day: today,
             calendar: None,
             sounds: Sounds::new(),
+            window_snow: WindowSnow::new(display_scale, window_snow_seed),
+            scan_timer: 0.0,
             storm_until: -1.0,
             celebrate_at: None,
+            // JULE_UPDATE_DELAY=N: the first check after N seconds (testing)
+            update_timer: std::env::var("JULE_UPDATE_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0),
+            update_check: None,
             time: 0.0,
             wind: 0.0,
             wind_target: 0.0,
@@ -172,7 +186,9 @@ impl Controller {
             rebuild_in: None,
         };
         c.update_power_save();
-        c.update_daily(true);
+        // the "updated" notice takes the place of the start notice (Windows shows only the last balloon)
+        let updated = c.announce_update();
+        c.update_daily(!updated);
         c.warm_sounds();
         c.build_screens();
         if opts.santa {
@@ -254,6 +270,8 @@ impl Controller {
             s.layer.neighbor_right = crate::figures::neighbor(&rects, i, 1.0).is_some();
         }
         self.figures.screens_changed();
+        // the piles' sizes follow the desktop scale; X11 has one for all screens
+        self.window_snow.set_scale(self.display.dpi_scale);
         self.update_desktop();
     }
 
@@ -325,6 +343,7 @@ impl Controller {
     fn handle_tray(&mut self, msg: TrayMsg) {
         match msg {
             TrayMsg::Quit => {}
+            TrayMsg::CheckUpdate => self.check_for_update(true),
             TrayMsg::Calendar => self.show_calendar(),
             TrayMsg::Santa => {
                 let screens = self.screen_infos();
@@ -352,6 +371,84 @@ impl Controller {
             TrayMsg::Autostart(on) => {
                 crate::autostart::set(on);
                 self.update_tray();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ automatic update
+    /// After an update: "Jule-hygge er opdateret" once, with the new version.
+    /// Returns true when it showed the notice.
+    fn announce_update(&mut self) -> bool {
+        if !crate::updater::is_release_build() {
+            return false;
+        }
+        let now = crate::updater::display(crate::updater::current());
+        if self.cfg.last_version == now {
+            return false;
+        }
+        let shown = !self.cfg.last_version.is_empty();
+        if shown {
+            self.session.notify(text::NOTICE_UPDATED_TITLE, &text::notice_updated(&now), false);
+        }
+        self.cfg.last_version = now;
+        self.cfg.save();
+        shown
+    }
+
+    /// Asks GitHub for a newer release on a worker thread (`manual`: asked for from the menu).
+    fn check_for_update(&mut self, manual: bool) {
+        if self.update_check.is_some() || !crate::updater::is_release_build() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let started = std::thread::Builder::new().name("update".into()).spawn(move || {
+            let _ = tx.send(crate::updater::check_and_download());
+        });
+        match started {
+            Ok(_) => self.update_check = Some((rx, manual)),
+            Err(e) => crate::log::error(&format!("update: {e}")),
+        }
+    }
+
+    /// The check's outcome, when it has finished: a newer version is put in place, and the app then quits with
+    /// `RESTART_EXIT_CODE` (the supervisor starts the new binary). Returns that exit code.
+    fn poll_update(&mut self) -> Option<i32> {
+        let (rx, manual) = self.update_check.as_ref()?;
+        let manual = *manual;
+        let outcome = match rx.try_recv() {
+            Ok(o) => o,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                crate::updater::Outcome::Failed("the update check stopped".into())
+            }
+        };
+        self.update_check = None;
+        let current = crate::updater::display(crate::updater::current());
+        match outcome {
+            crate::updater::Outcome::UpToDate => {
+                if manual {
+                    self.session.notify(text::NOTICE_UPDATE_TITLE, &text::notice_up_to_date(&current), false);
+                }
+                None
+            }
+            crate::updater::Outcome::Failed(e) => {
+                crate::log::error(&format!("update failed: {e}"));
+                if manual {
+                    self.session.notify(text::NOTICE_UPDATE_TITLE, &text::notice_update_failed(&e), false);
+                }
+                None
+            }
+            crate::updater::Outcome::Ready { version, file } => {
+                let v = crate::updater::display(version);
+                if let Err(e) = crate::updater::install(&file) {
+                    crate::log::error(&format!("update: {e}"));
+                    if manual {
+                        self.session.notify(text::NOTICE_UPDATE_TITLE, &text::notice_install_failed(&v, &e), false);
+                    }
+                    return None;
+                }
+                crate::log::debug(&format!("update: installed {v}, restarting"));
+                Some(crate::updater::RESTART_EXIT_CODE)
             }
         }
     }
@@ -580,6 +677,7 @@ impl Controller {
     /// display off) or frames stalled (e.g. after suspend): otherwise they stay "on the way" while nothing moves.
     fn finish_runs(&mut self) {
         self.figures.finish_runs();
+        self.window_snow.finish();
         self.sounds.hub.stop_all();
     }
 
@@ -594,7 +692,7 @@ impl Controller {
         }
         let fr = self.cfg.frame_rate as f64;
         let calm = if self.power_save { fr.min(12.0) } else { fr };
-        let busy = self.figures.busy() || self.screens.iter().any(|s| s.layer.is_busy());
+        let busy = self.figures.busy() || self.window_snow.busy() || self.screens.iter().any(|s| s.layer.is_busy());
         if busy {
             calm.max(if self.power_save { 20.0 } else { 30.0 })
         } else {
@@ -603,7 +701,8 @@ impl Controller {
     }
 
     // ------------------------------------------------------------------ main loop
-    pub fn run(&mut self) -> Res<()> {
+    /// Runs until the app quits; returns the exit code (`updater::RESTART_EXIT_CODE` after an update).
+    pub fn run(&mut self) -> Res<i32> {
         let mut last = Instant::now();
         let mut next_frame = Instant::now();
         let mut stats = Stats::new();
@@ -614,12 +713,16 @@ impl Controller {
             while let Ok(msg) = self.tray_rx.try_recv() {
                 if let TrayMsg::Quit = msg {
                     self.shutdown();
-                    return Ok(());
+                    return Ok(0);
                 }
                 self.handle_tray(msg);
             }
             if self.session.calendar_clicked() {
                 self.show_calendar();
+            }
+            if let Some(code) = self.poll_update() {
+                self.shutdown();
+                return Ok(code);
             }
 
             if self.check_asleep() {
@@ -654,6 +757,9 @@ impl Controller {
                 0
             };
             self.update_wind(dt, level);
+            let bottom = self.screens.iter().map(|s| s.layer.rect.bottom()).max().unwrap_or(0) as f32;
+            let melt = !(self.cfg.snow || self.time < self.storm_until) || !self.cfg.window_snow;
+            self.window_snow.update(dt, melt, level == 2, self.wind, bottom);
             let st = SceneState {
                 time: self.time,
                 wind: self.wind,
@@ -672,6 +778,10 @@ impl Controller {
                 santa: self.figures.santa.as_ref(),
                 sparks: &self.figures.sparks,
                 plow: Some(&self.figures.plow),
+                window_snow: self.cfg.window_snow,
+                ledges: &self.window_snow.ledges,
+                clumps: &self.window_snow.clumps,
+                ledge_u: self.display.dpi_scale,
             };
             let busy = Instant::now();
             frame_all(&mut self.display, &mut self.screens, dt, &st);
@@ -733,6 +843,15 @@ impl Controller {
             self.power_timer = 5.0;
             self.update_power_save();
         }
+        if crate::updater::is_release_build() {
+            self.update_timer -= dt;
+            if self.update_timer <= 0.0 {
+                self.update_timer = 6.0 * 3600.0;
+                if self.cfg.auto_update {
+                    self.check_for_update(false);
+                }
+            }
+        }
         self.day_timer -= dt;
         if self.day_timer <= 0.0 {
             self.day_timer = 30.0;
@@ -750,6 +869,23 @@ impl Controller {
                 }
             }
         }
+        // With snow on windows the scan runs 4 times a second, so piles follow moved windows and fall soon after a
+        // minimize; every frame while a window with snow moves. Switched off, it only runs while snow is left.
+        self.scan_timer -= dt;
+        if self.scan_timer <= 0.0 {
+            self.scan_timer = if !self.cfg.window_snow {
+                1.0
+            } else if self.window_snow.moving() {
+                0.0
+            } else {
+                0.25
+            };
+            if self.cfg.window_snow || !self.window_snow.ledges.is_empty() {
+                let rects: Vec<Rect> = self.screens.iter().map(|s| s.layer.rect).collect();
+                let wins = crate::window_snow::scan(&self.display.client_windows(), &rects, self.display.dpi_scale);
+                self.window_snow.update_ledges(wins);
+            }
+        }
         self.desktop_timer -= dt;
         if self.desktop_timer <= 0.0 {
             self.desktop_timer = 1.0;
@@ -758,9 +894,13 @@ impl Controller {
         self.top_timer -= dt;
         if self.top_timer <= 0.0 {
             self.top_timer = 2.0;
-            for s in &self.screens {
-                if let Some(w) = &s.window {
-                    self.display.raise(w);
+            let overlays: Vec<u32> = self.screens.iter().filter_map(|s| s.window.as_ref().map(|w| w.win)).collect();
+            if !overlays.is_empty() && self.display.needs_raise(&overlays) {
+                crate::log::debug("an app window came above the snow: raising the overlays");
+                for s in &self.screens {
+                    if let Some(w) = &s.window {
+                        self.display.raise(w);
+                    }
                 }
             }
         }
@@ -771,6 +911,16 @@ impl Controller {
     fn after_frame(&mut self) {
         for i in 0..self.screens.len() {
             self.figures.plow.pushed += self.screens[i].layer.take_pushed();
+            for (li, x, r) in self.screens[i].layer.take_ledge_hits() {
+                if let Some(l) = self.window_snow.ledges.get_mut(li) {
+                    l.deposit(x, r);
+                }
+            }
+            for ci in self.screens[i].layer.take_clumps_landed() {
+                if let Some(c) = self.window_snow.clumps.get_mut(ci) {
+                    c.dead = true;
+                }
+            }
             let from_scale = self.screens[i].layer.scale();
             for elf in self.screens[i].layer.take_outgoing_elves() {
                 let rects: Vec<Rect> = self.screens.iter().map(|s| s.layer.rect).collect();

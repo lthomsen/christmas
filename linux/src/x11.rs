@@ -4,7 +4,8 @@
 //! The overlay windows correspond to the `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST` forms in `src/Layer.cs`:
 //! - a 32-bit ARGB visual, so the compositor blends them with alpha (needs a running compositor);
 //! - `override_redirect`, so the window manager neither decorates them nor lists them in the taskbar or alt-tab,
-//!   and they are raised again every 2 seconds like `KeepOnTop()`;
+//!   and they are raised again when an app window has come above them (checked every 2 seconds, like
+//!   `KeepOnTop()`), but never above menus and other popups (`needs_raise`);
 //! - an empty input shape (XFixes), so every click goes through to the windows below.
 //!
 //! Pixels reach the window through MIT-SHM where possible: each screen is drawn straight into a shared memory
@@ -109,6 +110,12 @@ x11rb::atom_manager! {
         _GTK_FRAME_EXTENTS,
         _NET_WM_ICON,
         _NET_WM_PID,
+        _NET_WM_DESKTOP,
+        _NET_WM_STATE_HIDDEN,
+        _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_WINDOW_TYPE_DIALOG,
+        _NET_FRAME_EXTENTS,
+        _NET_CLIENT_LIST_STACKING,
         _NET_WM_WINDOW_TYPE_NORMAL,
         WM_PROTOCOLS,
         WM_DELETE_WINDOW,
@@ -455,6 +462,24 @@ impl Display {
         let _ = if mapped { self.conn.map_window(w.win) } else { self.conn.unmap_window(w.win) };
     }
 
+    /// True when a visible managed window (an app window in its frame) is stacked above any of the overlays, so
+    /// they must be raised again. Windows the window manager does not manage (`override_redirect`: menus, the
+    /// tray's popup menu, tooltips, the desktop's own popups) are left above the snow: raising over them would
+    /// hide an open menu behind the snow a moment after it appears.
+    pub fn needs_raise(&self, overlays: &[Window]) -> bool {
+        let Some(tree) = self.conn.query_tree(self.root).ok().and_then(|c| c.reply().ok()) else { return true };
+        // children are listed bottom to top; everything above the lowest overlay is a candidate
+        let Some(lowest) = tree.children.iter().position(|w| overlays.contains(w)) else { return true };
+        let above: Vec<Window> =
+            tree.children[lowest + 1..].iter().copied().filter(|w| !overlays.contains(w)).collect();
+        let cookies: Vec<_> = above.iter().map(|&w| self.conn.get_window_attributes(w).ok()).collect();
+        cookies
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.reply().ok())
+            .any(|a| !a.override_redirect && a.map_state == x11rb::protocol::xproto::MapState::VIEWABLE)
+    }
+
     /// Puts the window above all others again (the `KeepOnTop()` of `src/Layer.cs`).
     pub fn raise(&self, w: &OverlayWindow) {
         let _ = self.conn.configure_window(w.win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
@@ -788,6 +813,74 @@ impl Display {
             return Some(r);
         }
         None
+    }
+
+    /// The managed windows, front to back, with their visible frames: what snow on windows needs to know
+    /// (`ScanWindows` on Windows). A window "shown" is a normal app window (not a dialog, panel, desktop or
+    /// taskbar-less helper), not minimized, on the current workspace (or on all), and not one of ours.
+    ///
+    /// The visible frame is the client area moved out by the window manager's decorations (`_NET_FRAME_EXTENTS`,
+    /// the title bar) and in by a client-side decorated window's invisible shadow (`_GTK_FRAME_EXTENTS`). All
+    /// requests are sent before the first reply is read, so a scan costs about one round trip.
+    pub fn client_windows(&self) -> Vec<crate::window_snow::ClientWindow> {
+        let a = &self.atoms;
+        let stacking = self.prop32(self.root, a._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, 4096);
+        let desktop = self.prop32(self.root, a._NET_CURRENT_DESKTOP, AtomEnum::CARDINAL, 1).first().copied();
+        let me = std::process::id();
+        let get =
+            |w: Window, prop: u32, ty: AtomEnum, len: u32| self.conn.get_property(false, w, prop, ty, 0, len).ok();
+        // bottom-to-top in the list; the snow needs front to back
+        let pending: Vec<_> = stacking
+            .iter()
+            .rev()
+            .map(|&w| {
+                (
+                    w,
+                    get(w, a._NET_WM_STATE, AtomEnum::ATOM, 32),
+                    get(w, a._NET_WM_WINDOW_TYPE, AtomEnum::ATOM, 16),
+                    get(w, a._NET_WM_DESKTOP, AtomEnum::CARDINAL, 1),
+                    get(w, a._NET_WM_PID, AtomEnum::CARDINAL, 1),
+                    get(w, a._NET_FRAME_EXTENTS, AtomEnum::CARDINAL, 4),
+                    get(w, a._GTK_FRAME_EXTENTS, AtomEnum::CARDINAL, 4),
+                    self.conn.get_geometry(w).ok(),
+                    self.conn.translate_coordinates(w, self.root, 0, 0).ok(),
+                )
+            })
+            .collect();
+        let vals = |c: Option<x11rb::cookie::Cookie<'_, RustConnection, x11rb::protocol::xproto::GetPropertyReply>>| {
+            c.and_then(|c| c.reply().ok())
+                .and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>()))
+                .unwrap_or_default()
+        };
+        let mut out = Vec::with_capacity(pending.len());
+        for (w, state, ty, desk, pid, frame, gtk, geo, pos) in pending {
+            let (state, ty, desk, pid, frame, gtk) =
+                (vals(state), vals(ty), vals(desk), vals(pid), vals(frame), vals(gtk));
+            let (Some(geo), Some(pos)) = (geo.and_then(|c| c.reply().ok()), pos.and_then(|c| c.reply().ok())) else {
+                continue; // closed while we asked
+            };
+            let mut r = Rect::new(pos.dst_x as i32, pos.dst_y as i32, geo.width as i32, geo.height as i32);
+            if let [l, rr, t, b] = gtk[..] {
+                r = Rect::new(r.x + l as i32, r.y + t as i32, r.w - (l + rr) as i32, r.h - (t + b) as i32);
+            }
+            if let [l, rr, t, b] = frame[..] {
+                r = Rect::new(r.x - l as i32, r.y - t as i32, r.w + (l + rr) as i32, r.h + (t + b) as i32);
+            }
+            let normal = ty.is_empty() || ty.contains(&a._NET_WM_WINDOW_TYPE_NORMAL);
+            let on_this_desktop = match (desk.first(), desktop) {
+                (Some(&d), Some(cur)) => d == cur || d == 0xFFFF_FFFF,
+                _ => true,
+            };
+            let shown = normal
+                && on_this_desktop
+                && !state.contains(&a._NET_WM_STATE_HIDDEN)
+                && !state.contains(&a._NET_WM_STATE_SKIP_TASKBAR)
+                && pid.first() != Some(&me);
+            let maximized =
+                state.contains(&a._NET_WM_STATE_MAXIMIZED_VERT) && state.contains(&a._NET_WM_STATE_MAXIMIZED_HORZ);
+            out.push(crate::window_snow::ClientWindow { id: w, rect: r, shown, maximized });
+        }
+        out
     }
 
     /// True when DPMS has switched the display off (standby, suspend or off).
