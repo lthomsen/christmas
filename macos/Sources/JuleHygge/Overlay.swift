@@ -248,13 +248,14 @@ final class ScreenOverlay {
         }
 
         let h = H
+        // snow on other windows sits on those windows, so the light string and everything that moves
+        // (Santa, sparks, nisser) is drawn over it
+        ledgeLayer.frame = root.bounds
+        root.addSublayer(ledgeLayer)
         lightsSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.renderLights(g) }
         lightsLayer.frame = root.bounds
         lightsLayer.isHidden = true
         root.addSublayer(lightsLayer)
-        // snow on other windows sits on those windows, so everything that moves (Santa, sparks, nisser) is drawn over it
-        ledgeLayer.frame = root.bounds
-        root.addSublayer(ledgeLayer)
         sparkPool = DotPool(in: root, screenHeight: h)
         santaSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSanta(g) }
         snowmanSprite = Sprite(parent: root, screenHeight: h, scale: scale) { [weak self] g in self?.drawSnowman(g) }
