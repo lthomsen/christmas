@@ -35,7 +35,7 @@ JuleHygge er et juleoverlay til Windows (WinForms, .NET Framework 4.x) i `src/`,
 
 ## Git
 - Git og `gh` er installeret, men ligger måske ikke på PATH i ældre shells. Brug i så fald `C:\Program Files\Git\cmd\git.exe` og `C:\Program Files\GitHub CLI\gh.exe`.
-- Remote: `rkl1976/christmas` on GitHub. Create releases with `gh release create vX.Y.Z --notes-file ...` and **no files**: the Windows and macOS workflows build and attach `JuleHygge.exe` and `JuleHygge-macOS.zip`. Never upload a local build: the app's self-update (`src/Updater.cs`) only installs an exe whose version matches the release tag, and local builds are 0.0.0.
+- Remote: `rkl1976/christmas` on GitHub. Make releases with the **Make release** workflow (`.github/workflows/release.yml`; Actions tab, or `gh workflow run release.yml -f bump=patch`): it picks the next version, builds and attaches `JuleHygge.exe` and `JuleHygge-macOS.zip`, and publishes only when both are on the release. Merging a PR does not release anything. A hand-made `gh release create vX.Y.Z --notes-file ...` (with **no files**) also works: the build workflows attach their files on "release published". Never upload a local build: the app's self-update (`src/Updater.cs`) only installs an exe whose version matches the release tag, and local builds are 0.0.0.
 
 ## macOS (`macos/`)
 - Byg med `macos/build.sh` (Swift Package + `.app`-bundle, ad-hoc-signeret). Luk appen først: `pkill -x JuleHygge`.
